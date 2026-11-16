@@ -1,28 +1,46 @@
+
 name: Build APK
 
 on:
   push:
     branches: [main, master]
-  workflow_dispatch:   # permite ejecutarlo a mano desde la pestaña Actions
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 90
+
     steps:
-      - name: Descargar el código
+      - name: Descargar el codigo
         uses: actions/checkout@v4
 
-      - name: Compilar con Buildozer
-        uses: ArtemSBulgakov/buildozer-action@v1
-        id: buildozer
-        with:
-          command: buildozer android debug
-          buildozer_version: stable
+      - name: Instalar dependencias
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git zip unzip openjdk-17-jdk \
+            python3-pip python3-venv python3-dev \
+            build-essential autoconf libtool \
+            pkg-config zlib1g-dev libncurses5-dev \
+            libncursesw5-dev libtinfo6 cmake \
+            libffi-dev libssl-dev automake
 
-      - name: Guardar el APK
+      - name: Preparar Python
+        run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install buildozer setuptools cython==0.29.34
+
+      - name: Compilar APK
+        run: |
+          source .venv/bin/activate
+          buildozer -v android debug
+
+      - name: Guardar APK
         uses: actions/upload-artifact@v4
         with:
           name: english-quiz-apk
-          path: ${{ steps.buildozer.outputs.filename }}
+          path: bin/*.apk
           if-no-files-found: error
