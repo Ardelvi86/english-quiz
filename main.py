@@ -1261,6 +1261,11 @@ def spoken_text(category, passage):
     return [ln.strip() for ln in text.split("\n") if ln.strip()]
 
 
+def _detail(error):
+    """Texto corto con el tipo y el mensaje de un error."""
+    return ("%s: %s" % (type(error).__name__, str(error))).replace("\n", " ")[:160]
+
+
 class Speaker:
     """Texto a voz. En Android usa TextToSpeech; en escritorio, la voz del sistema."""
 
@@ -1274,6 +1279,7 @@ class Speaker:
 
     # --- Android
     def _init_android(self):
+        self._status = None
         try:
             from jnius import autoclass, PythonJavaClass, java_method
 
@@ -1294,25 +1300,48 @@ class Speaker:
             self._locale = autoclass("java.util.Locale")
             self._listener = InitListener(self._on_init)  # guardar la referencia
             self._engine = self._tts_cls(activity, self._listener)
-        except Exception:
+        except Exception as e:
             self._engine = None
-            self.error = MSG_NO_ENGINE
+            self.error = "%s\nDetalle: %s" % (MSG_NO_ENGINE, _detail(e))
+            print("[voz] error al crear TextToSpeech:", _detail(e))
 
     def _on_init(self, status):
-        if status != self._tts_cls.SUCCESS:
-            self._engine = None
-            self.error = MSG_NO_ENGINE
+        # Lo llama Android cuando el motor termina de iniciar; solo se guarda el
+        # resultado y el resto se completa en _finish_init() (hilo principal).
+        self._status = status
+        print("[voz] onInit status =", status)
+
+    def _finish_init(self):
+        if self._ready or self._status is None or self._engine is None:
             return
-        if self._engine.setLanguage(self._locale.US) < 0:  # -1 faltan datos, -2 sin soporte
-            self.error = MSG_NO_ENGLISH
-        self._ready = True
+        try:
+            if self._status != self._tts_cls.SUCCESS:
+                self._engine = None
+                self.error = ("%s\nDetalle: el motor respondió con el código %s. En Android 11 o "
+                              "superior esto pasa si la app apunta a una API nueva; usa "
+                              "android.api = 29 en buildozer.spec." % (MSG_NO_ENGINE, self._status))
+                return
+            if self._engine.setLanguage(self._locale.US) < 0:  # -1 faltan datos, -2 sin soporte
+                self.error = MSG_NO_ENGLISH
+            self._ready = True
+        except Exception as e:
+            self._engine = None
+            self.error = "%s\nDetalle: %s" % (MSG_NO_ENGINE, _detail(e))
+            print("[voz] error al terminar de iniciar:", _detail(e))
 
     def _speak_android(self, lines, slow):
         engine, cls = self._engine, self._tts_cls
         engine.setSpeechRate(0.6 if slow else 0.95)
         for i, line in enumerate(lines):
-            engine.speak(line, cls.QUEUE_FLUSH if i == 0 else cls.QUEUE_ADD, None, None)
-            engine.playSilentUtterance(450, cls.QUEUE_ADD, None)  # pausa entre frases
+            mode = cls.QUEUE_FLUSH if i == 0 else cls.QUEUE_ADD
+            try:
+                engine.speak(line, mode, None, None)
+            except Exception:
+                engine.speak(line, mode, None)          # firma antigua (API < 21)
+            try:
+                engine.playSilentUtterance(450, cls.QUEUE_ADD, None)  # pausa entre frases
+            except Exception:
+                pass
 
     # --- Escritorio (para probar en el computador)
     def _speak_desktop(self, lines, slow):
@@ -1356,13 +1385,18 @@ class Speaker:
         if self._engine is None:
             return self.error or MSG_NO_ENGINE
         if not self._ready:
-            return "La voz se está iniciando. Toca de nuevo en un segundo."
+            self._finish_init()
+            if self._engine is None:
+                return self.error or MSG_NO_ENGINE
+            if not self._ready:
+                return "La voz se está iniciando. Toca de nuevo en un segundo."
         if self.error:
             return self.error
         try:
             self._speak_android(lines, slow)
-        except Exception:
-            return MSG_NO_ENGINE
+        except Exception as e:
+            print("[voz] error al leer:", _detail(e))
+            return "No se pudo reproducir la voz.\nDetalle: %s" % _detail(e)
         return ""
 
     def stop(self):
