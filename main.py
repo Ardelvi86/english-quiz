@@ -35,7 +35,7 @@ else:
     Window.softinput_mode = "below_target"
 
 DB_NAME = "english_quiz.db"
-SEED_VERSION = 4  # 1 = original, 2 = + Units 3 & 4, 3 = modelo de voz, 4 = preguntas de Listening sin pistas
+SEED_VERSION = 5  # 1 = original, 2 = + Units 3 & 4, 3 = modelo de voz, 4 = Listening sin pistas, 5 = 25 por apartado
 # Textos antiguos que se reemplazan en bases de datos ya creadas
 PROMPT_FIXES = [
     ("Listen and write the place that is next to the school.",
@@ -431,6 +431,12 @@ UNITS_3_4 = {
 for _category, _topics in UNITS_3_4.items():
     SEED[_category].extend(_topics)
 
+# 25 ejercicios por apartado en cada unidad (están en units_data.py)
+from units_data import EXTRA_UNITS_3_4  # noqa: E402
+
+for _category, _topics in EXTRA_UNITS_3_4.items():
+    SEED[_category].extend(_topics)
+
 
 # --------------------------------------------------------------------------
 # Utilidades
@@ -518,7 +524,7 @@ KV = r"""
     hint_text_color: C_MUTED
     cursor_color: C_PRIMARY
     selection_color: 0.30, 0.62, 0.98, 0.35
-    padding: [dp(14), dp(14), dp(14), dp(10)]
+    padding: [dp(14), dp(12), dp(14), dp(8)]
     canvas.before:
         Color:
             rgba: C_SURFACE2
@@ -526,12 +532,23 @@ KV = r"""
             pos: self.pos
             size: self.size
             radius: [dp(12)]
+        # IMPORTANTE: TextInput pinta su texto con el último Color de canvas.before.
+        # Hay que devolverle su color después de dibujar el fondo; si no, el texto
+        # sale del mismo color que el fondo y no se ve.
+        Color:
+            rgba: self.disabled_foreground_color if self.disabled else (self.hint_text_color if not self.text and not self.focus else self.foreground_color)
     canvas.after:
         Color:
             rgba: C_PRIMARY if self.focus else C_LINE
         Line:
             rounded_rectangle: (self.x, self.y, self.width, self.height, dp(12))
             width: 1.1
+        # El cursor propio original queda tapado por el fondo, así que se dibuja aquí.
+        Color:
+            rgba: C_PRIMARY if self.focus else (0, 0, 0, 0)
+        Rectangle:
+            pos: self.cursor_pos
+            size: self.cursor_width, self.line_height + self.line_spacing
 
 <RBtn>:
     size_hint_y: None
@@ -1258,8 +1275,7 @@ class Speaker:
     # --- Android
     def _init_android(self):
         try:
-            # python-for-android supplies this Android-only module.
-            from jnius import autoclass, PythonJavaClass, java_method  # pyright: ignore[reportMissingImports]
+            from jnius import autoclass, PythonJavaClass, java_method
 
             class InitListener(PythonJavaClass):
                 __javainterfaces__ = ["android/speech/tts/TextToSpeech$OnInitListener"]
