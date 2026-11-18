@@ -1098,6 +1098,10 @@ KV = r"""
                         text: 'Seleccionar libro PDF e Importar'
                         bg: 0.13, 0.67, 0.50, 1
                         on_release: root.pick_and_import_pdf()
+                    Banner:
+                        id: status
+                        text: 'Pega tu API Key de Gemini para importar el libro.'
+                        color: C_MUTED
                 Card:
                     Section:
                         text: 'ÁREA DE APRENDIZAJE (MANUAL)'
@@ -1153,10 +1157,6 @@ KV = r"""
                     text: 'Delete selected topic'
                     bg: 0.62, 0.20, 0.22, 1
                     on_release: root.confirm_delete_topic()
-                Banner:
-                    id: status
-                    text: 'Los datos e imágenes se guardan en este dispositivo.'
-                    color: C_MUTED
 """
 
 
@@ -1523,13 +1523,36 @@ class VoiceRecognizer:
 
 
 def pick_pdf_file(temp_dir, on_picked, on_error):
-    """Abre el selector nativo de archivos en Android o busca PDF local en PC."""
+    """Abre el selector de archivos de la plataforma actual."""
     if platform != "android":
-        sample = os.path.join(BASE_DIR, "top-notch-fundamentals-a.pdf")
-        if os.path.exists(sample):
-            on_picked(sample)
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+        except ImportError as exc:
+            on_error("No está disponible el selector de archivos: %s" % exc)
+            return
+
+        root = None
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            pdf_path = filedialog.askopenfilename(
+                parent=root,
+                title="Selecciona un libro PDF",
+                filetypes=[("Archivos PDF", "*.pdf")],
+            )
+        except tk.TclError as exc:
+            on_error("No se pudo abrir el selector de PDF: %s" % exc)
+            return
+        finally:
+            if root is not None:
+                root.destroy()
+
+        if pdf_path:
+            on_picked(pdf_path)
         else:
-            on_error("En PC coloca 'top-notch-fundamentals-a.pdf' junto a main.py.")
+            on_error("Selección de PDF cancelada.")
         return
 
     try:
