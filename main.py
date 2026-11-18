@@ -1,18 +1,19 @@
-"""English Quiz - app de práctica de inglés (nivel A1) hecha con Kivy.
+"""English Quiz - App completa de aprendizaje de inglés (Nivel A1).
 
-Áreas: Reading, Listening, Speaking, Writing, Conversations.
-Incluye: base de datos SQLite, progreso/estadísticas, administración de
-temas y ejercicios, validación de respuestas mejorada y audio/TTS opcional.
-
-Dependencias: kivy. La voz (Listening/Speaking) usa el texto a voz del propio
-dispositivo, así que no hace falta subir audios.
+Incluye:
+1. Práctica guiada (Reading, Listening, Speaking, Writing, Conversations) con imágenes.
+2. Evaluación (Quiz) por unidad o mixta sin pistas.
+3. Conversación en línea con amigo (chat en tiempo real + voz).
+4. Importador automático de libros PDF con IA en Manage topics.
 """
 import os
+import random
 import re
 import sqlite3
 import unicodedata
 
 from kivy.app import App
+from kivy.clock import Clock
 from kivy.lang import Builder
 from kivy.core.audio import SoundLoader
 from kivy.core.window import Window
@@ -31,28 +32,24 @@ from kivy.uix.widget import Widget
 if platform not in ("android", "ios"):
     Window.size = (400, 740)
 else:
-    # Que el teclado del celular no tape el cuadro de respuesta
     Window.softinput_mode = "below_target"
 
 DB_NAME = "english_quiz.db"
-SEED_VERSION = 5  # 1 = original, 2 = + Units 3 & 4, 3 = modelo de voz, 4 = Listening sin pistas, 5 = 25 por apartado
-# Textos antiguos que se reemplazan en bases de datos ya creadas
-PROMPT_FIXES = [
-    ("Listen and write the place that is next to the school.",
-     "Listen and write the place they are asking about."),
-]
-PASSAGE_FIXES = [
-    ("My name is... I am ... years old. I am from...",
-     "Modelo: My name is Daniel. I am 25 years old. I am from Colombia."),
-]
-AUDIO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "audio")
+SEED_VERSION = 8
+EXAM_QUESTION_COUNT = 25
+# Opcional: pega aquí tu URL de Firebase Realtime Database (ej. "https://mi-app-default-rtdb.firebaseio.com")
+FIREBASE_DB_URL = "https://english-quiz-app-3f3b3-default-rtdb.firebaseio.com/"
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+AUDIO_DIR = os.path.join(BASE_DIR, "assets", "audio")
+BUNDLED_IMAGE_DIR = os.path.join(BASE_DIR, "assets", "images")
 CATEGORIES = ["Reading", "Listening", "Speaking", "Writing", "Conversations"]
 
 DESCRIPTIONS = {
     "Reading": "Lee el texto y responde la pregunta.",
-    "Listening": "Toca Play audio, escucha con atención y escribe lo que se pide. Puedes repetirlo o ponerlo más lento.",
+    "Listening": "Toca Play audio, escucha con atención y escribe lo que se pide.",
     "Speaking": "Escucha el modelo, dilo en voz alta y escribe lo que dijiste.",
-    "Writing": "Completa palabras y frases escribiendo la respuesta.",
+    "Writing": "Lee la regla o ejemplo y completa la palabra o frase.",
     "Conversations": "Completa el diálogo y practica con un compañero.",
 }
 
@@ -65,7 +62,6 @@ OK_COLOR = (0.35, 0.88, 0.62, 1)
 BAD_COLOR = (1, 0.66, 0.36, 1)
 INFO_COLOR = (0.62, 0.80, 1, 1)
 
-# Color de cada área (el mismo que usan las tarjetas del inicio)
 AREA_COLORS = {
     "Reading": (0.20, 0.47, 0.93, 1),
     "Listening": (0.55, 0.36, 0.96, 1),
@@ -74,19 +70,31 @@ AREA_COLORS = {
     "Conversations": (0.08, 0.64, 0.74, 1),
 }
 
+CONVERSATION_PROMPTS = [
+    "Unit 1: Ask your friend's name, occupation, and how to spell their last name.",
+    "Unit 2: Introduce a friend and ask for their phone number or e-mail.",
+    "Unit 3: Ask how to get to the bank or pharmacy from your house.",
+    "Unit 4: Describe two people in your family (age, appearance, occupation).",
+    "Unit 5: Invite your friend to a movie or dinner and agree on the time.",
+    "Unit 6: Roleplay in a clothing store asking for colors and sizes.",
+    "Unit 7: Talk about your typical weekend and who does chores at home.",
+]
+
 Window.clearcolor = BG
 
 
 # --------------------------------------------------------------------------
-# Componentes visuales (su apariencia está definida en el KV)
+# Componentes visuales
 # --------------------------------------------------------------------------
 class RBtn(Button):
-    """Botón con esquinas redondeadas; el color se cambia con 'bg'."""
     bg = ListProperty([0.20, 0.47, 0.93, 1])
 
 
 class Tile(Button):
-    """Tarjeta grande de color del inicio."""
+    bg = ListProperty([0.20, 0.47, 0.93, 1])
+
+
+class ModeCard(Button):
     bg = ListProperty([0.20, 0.47, 0.93, 1])
 
 
@@ -95,7 +103,6 @@ class Card(BoxLayout):
 
 
 class Banner(Label):
-    """Mensaje con fondo suave del mismo color que el texto."""
     bg = ListProperty([0, 0, 0, 0])
 
 
@@ -124,328 +131,39 @@ class StatHero(BoxLayout):
     pct = StringProperty("0%")
     detail = StringProperty("")
 
-# --------------------------------------------------------------------------
-# Datos iniciales: categoría -> [(tema, descripción, [(prompt, passage,
-#                                respuesta, audio, modo), ...]), ...]
-# En 'respuesta' se pueden poner alternativas separadas por "|".
-# modo: 'exact' (igual) o 'contains' (la respuesta contiene la frase clave).
-# --------------------------------------------------------------------------
-SEED = {
-    "Reading": [
-        ("Personal information", "Lee perfiles personales cortos.", [
-            ("What is the person's name?",
-             "Hello! My name is Daniel. I am 25 years old. I am from Colombia.",
-             "Daniel", "", "exact"),
-            ("How old is Anna?",
-             "Hi! I'm Anna. I'm 19 years old. I live in Madrid with my family.",
-             "19|nineteen|19 years old|she is 19|she's 19", "", "exact"),
-            ("Where is Tom from?",
-             "This is Tom. He is from Canada. He is a teacher.",
-             "Canada|he is from canada|he's from canada", "", "exact"),
-        ]),
-        ("Daily routine", "Textos sobre la rutina diaria.", [
-            ("What time does Laura get up?",
-             "Laura gets up at 6:30. She eats breakfast at 7:00 and goes to work at 8:00.",
-             "6:30|6.30|half past six|at 6:30", "", "exact"),
-            ("What does Laura do at 7:00?",
-             "Laura gets up at 6:30. She eats breakfast at 7:00 and goes to work at 8:00.",
-             "eats breakfast|she eats breakfast|breakfast|has breakfast", "", "exact"),
-        ]),
-    ],
-    "Listening": [
-        ("At the bank", "Escucha una conversación corta.", [
-            ("Listen and write the place.",
-             "A: Excuse me. Where's the bank? B: It's around the corner.",
-             "bank|the bank", "bank.mp3", "exact"),
-        ]),
-        ("Numbers", "Escucha y escribe los números.", [
-            ("Listen and write the number (in digits).",
-             "My phone number is five, five, five, one, two, three.",
-             "555123|555 123|5 5 5 1 2 3|five five five one two three", "", "exact"),
-            ("Listen and write the age (in digits).",
-             "I am thirty years old.",
-             "30|thirty", "", "exact"),
-        ]),
-    ],
-    "Speaking": [
-        ("Introduce yourself", "Preséntate en inglés.", [
-            ("Say your name, age and city in English. Then type what you said.",
-             "Modelo: My name is Daniel. I am 25 years old. I am from Colombia.",
-             "my name is", "", "contains"),
-        ]),
-        ("Greetings", "Saludos y despedidas básicas.", [
-            ("Greet someone in the morning. Type what you said.",
-             "Good morning! How are you?",
-             "good morning|hello|hi", "", "contains"),
-            ("Say goodbye to a friend. Type what you said.",
-             "Goodbye! See you tomorrow.",
-             "goodbye|bye|see you", "", "contains"),
-        ]),
-    ],
-    "Writing": [
-        ("Verb to be", "Afirmativo y negativo.", [
-            ("Complete: She ____ a student.",
-             "Pista: usa la forma correcta del verbo to be.", "is", "", "exact"),
-            ("Complete: I ____ from Colombia.",
-             "Pista: usa la forma correcta del verbo to be.", "am", "", "exact"),
-            ("Complete: They ____ not at home.",
-             "Pista: usa la forma correcta del verbo to be.", "are", "", "exact"),
-        ]),
-        ("Plurals", "Plurales regulares e irregulares.", [
-            ("Write the plural of 'book'.", "Pista: agrega -s.", "books", "", "exact"),
-            ("Write the plural of 'child'.", "Pista: es irregular.", "children", "", "exact"),
-        ]),
-    ],
-    "Conversations": [
-        ("Asking for directions", "Practica un diálogo con un compañero.", [
-            ("Complete: It's ____ the supermarket.",
-             "Expresiones útiles: next to, behind, in front of, near.",
-             "next to|behind|in front of|near", "", "exact"),
-            ("Complete: Excuse me, where ____ the station?",
-             "Expresiones útiles: is / are.", "is", "", "exact"),
-        ]),
-        ("At the restaurant", "Pedir comida y bebida.", [
-            ("Complete: I ____ like a coffee, please.",
-             "Expresión cortés para pedir algo.", "would|'d", "", "exact"),
-            ("Complete: Can I have the ____, please? (to pay)",
-             "Al final de la comida.", "bill|check", "", "exact"),
-        ]),
-    ],
-}
 
-# --------------------------------------------------------------------------
-# Review - Units 3 & 4: Places, Directions, Transportation and Family
-# (mismo formato que SEED; se fusiona con él justo debajo)
-# --------------------------------------------------------------------------
-UNITS_3_4 = {
-    "Reading": [
-        ("Unit 3 - Places in the city", "Lugares de la ciudad.", [
-            ("Where do you buy medicine?",
-             "A pharmacy is where you buy medicine. A newsstand is where you buy "
-             "newspapers and magazines.",
-             "pharmacy|a pharmacy|the pharmacy|at the pharmacy", "", "exact"),
-            ("Where do you keep your money?",
-             "A bank is where you keep your money. A school is where you study and learn.",
-             "bank|a bank|the bank|at the bank", "", "exact"),
-            ("Where do you buy books?",
-             "A bookstore is where you buy books. A restaurant is where you eat food.",
-             "bookstore|a bookstore|the bookstore|at the bookstore", "", "exact"),
-            ("Where is the pharmacy?",
-             "A: Where's the pharmacy?\nB: It's across the street.",
-             "across the street|it's across the street|it is across the street",
-             "", "exact"),
-        ]),
-        ("Unit 3 - Transportation", "Medios de transporte con BY.", [
-            ("How does the speaker go to school?",
-             "I go to school by bus. My brother goes to work by train. "
-             "We say 'on foot', not 'by foot'.",
-             "by bus|bus|on the bus|i go by bus", "", "exact"),
-            ("How does the speaker's brother go to work?",
-             "I go to school by bus. My brother goes to work by train. "
-             "We say 'on foot', not 'by foot'.",
-             "by train|train|on the train|he goes by train", "", "exact"),
-            ("Which is correct: 'by foot' or 'on foot'?",
-             "We use BY with vehicles: by taxi, by bus, by car. The exception is 'on foot'.",
-             "on foot", "", "exact"),
-        ]),
-        ("Unit 4 - Family", "Lee sobre una familia.", [
-            ("Who is Louise?",
-             "This is my family. My dad is Carlos. He's 45 years old. My mom is Louise. "
-             "She's 42. I have one sister. She's 18 and very pretty.",
-             "mom|my mom|the mom|mother|my mother|she's my mom|she is my mom", "", "exact"),
-            ("How old is the mom?",
-             "This is my family. My dad is Carlos. He's 45 years old. My mom is Louise. "
-             "She's 42. I have one sister. She's 18 and very pretty.",
-             "42|forty-two|forty two|42 years old|she's 42|she is 42", "", "exact"),
-            ("How many sisters does the speaker have?",
-             "This is my family. My dad is Carlos. He's 45 years old. My mom is Louise. "
-             "She's 42. I have one sister. She's 18 and very pretty.",
-             "one|1|one sister|1 sister|she has one|i have one sister", "", "exact"),
-            ("How old is the sister?",
-             "This is my family. My dad is Carlos. He's 45 years old. My mom is Louise. "
-             "She's 42. I have one sister. She's 18 and very pretty.",
-             "18|eighteen|18 years old|she's 18|she is 18", "", "exact"),
-        ]),
-    ],
-    "Listening": [
-        ("Unit 3 - Directions", "Escucha dónde están los lugares.", [
-            ("Listen and write the place they are asking about.",
-             "A: Where's the bookstore? B: It's next to the school.",
-             "bookstore|the bookstore|a bookstore", "", "exact"),
-            ("Listen and write where the restaurant is.",
-             "A: Where's the restaurant? B: It's around the corner.",
-             "around the corner|it's around the corner|it is around the corner",
-             "", "exact"),
-            ("Listen and write where the pharmacy is.",
-             "A: Where's the pharmacy? B: It's across the street.",
-             "across the street|it's across the street|it is across the street",
-             "", "exact"),
-        ]),
-        ("Unit 3 - Transportation", "Escucha cómo viaja cada persona.", [
-            ("Listen and write how the person goes to work.",
-             "I go to work by train.",
-             "by train|train|on the train", "", "exact"),
-            ("Listen. How does she go to school?",
-             "She goes to school on foot.",
-             "on foot|she goes on foot|walking|she walks|walks", "", "exact"),
-            ("Listen and write the transportation.",
-             "My brother goes to the park by bicycle.",
-             "by bicycle|bicycle|bike|by bike|on a bicycle", "", "exact"),
-        ]),
-        ("Unit 4 - Family and ages", "Escucha edades y parentescos.", [
-            ("Listen and write the age (in digits).",
-             "A: How old is your sister? B: She's eighteen.",
-             "18|eighteen|she's 18|she's eighteen|she is 18", "", "exact"),
-            ("Listen and write the number (in digits).",
-             "A: How old are they? B: They're fifty.",
-             "50|fifty|they're 50|they're fifty|they are 50", "", "exact"),
-            ("Listen and write who he is.",
-             "A: Who is he? B: He's my dad.",
-             "dad|my dad|father|my father|he's my dad|he is my dad", "", "exact"),
-        ]),
-    ],
-    "Speaking": [
-        ("Unit 3 - Places and directions", "Di dónde queda cada lugar.", [
-            ("Where's the pharmacy? Answer with a direction expression. "
-             "Then type what you said.",
-             "Modelo: It's across the street.",
-             "across the street|next to|around the corner|down the street|"
-             "on the left|on the right|between", "", "contains"),
-            ("Say where the bookstore is, using 'next to'. Then type what you said.",
-             "Modelo: The bookstore is next to the school.",
-             "next to", "", "contains"),
-            ("Ask a partner where the bank is. Then type what you said.",
-             "Modelo: Where's the bank?",
-             "where's the bank|where is the bank", "", "contains"),
-        ]),
-        ("Unit 3 - How do you go?", "Habla de tu transporte.", [
-            ("Say how you go to school or work. Use 'by'. Then type what you said.",
-             "Modelo: I go to work by bus.",
-             "by|on foot", "", "contains"),
-            ("Say how you go to a place near your house. Then type what you said.",
-             "Modelo: I go to the pharmacy on foot.",
-             "by|on foot", "", "contains"),
-        ]),
-        ("Unit 4 - My family", "Habla de tu familia.", [
-            ("Say who is in your family. Then type what you said.",
-             "Modelo: I have one brother and one sister. My mom is Louise.",
-             "i have|my", "", "contains"),
-            ("Say how old a family member is. Then type what you said.",
-             "Modelo: He's twenty years old.",
-             "she's|he's|they're|years old|old", "", "contains"),
-            ("Ask your partner who is in their family. Then type what you said.",
-             "Modelo: Who is in your family?",
-             "who is|who's|who are", "", "contains"),
-        ]),
-    ],
-    "Writing": [
-        ("Unit 3 - Where questions", "Preguntas con Where y direcciones.", [
-            ("Complete: ____ the bank? (short form of Where is)",
-             "Pista: Where's + the place.", "where's|where is", "", "exact"),
-            ("Complete: It's ____ the street. (on the other side of the road)",
-             "Pista: across the street.", "across", "", "exact"),
-            ("Complete: It's ____ the corner. (you need to turn to find it)",
-             "Pista: around the corner.", "around", "", "exact"),
-            ("Complete: The restaurant is ____ the bank and the school. "
-             "(in the middle of two places)",
-             "Pista: la palabra significa 'entre'.", "between", "", "exact"),
-        ]),
-        ("Unit 3 - Imperatives", "Imperativos para dar direcciones.", [
-            ("Complete: ____ to the bank. (go on foot)",
-             "Pista: usa el verbo base, sin sujeto.", "walk", "", "exact"),
-            ("Complete: ____ the bus to the school.",
-             "Pista: Take + transporte.", "take", "", "exact"),
-            ("Make it negative: ____ drive.",
-             "Pista: forma negativa del imperativo.", "don't|do not", "", "exact"),
-        ]),
-        ("Unit 3 - BY + transportation", "Usa BY o 'on foot'.", [
-            ("Complete: I go to school ____ bus.",
-             "Pista: no se usa 'a' ni 'the' después.", "by", "", "exact"),
-            ("Complete: She goes to work ____ foot.",
-             "Pista: es la excepción: no se dice 'by foot'.", "on", "", "exact"),
-            ("Complete: He goes to the park ____ car.",
-             "Pista: BY + vehículo.", "by", "", "exact"),
-        ]),
-        ("Unit 4 - Who questions", "Preguntas con Who.", [
-            ("Complete: ____ is he? He's my dad.",
-             "Pista: pregunta por personas.", "who", "", "exact"),
-            ("Complete: ____ Louise? She's my mom. (short form of Who is)",
-             "Pista: forma corta de Who is.", "who's", "", "exact"),
-            ("Complete: Who ____ they? They're my sisters.",
-             "Pista: dos o más personas.", "are", "", "exact"),
-        ]),
-        ("Unit 4 - Have / has", "Have para I/you/we/they, has para he/she/it.", [
-            ("Complete: I ____ a brother.", "Pista: have o has.", "have", "", "exact"),
-            ("Complete: She ____ one brother.", "Pista: he, she, it usan has.",
-             "has", "", "exact"),
-            ("Complete: My mom ____ three siblings.", "Pista: my mom = she.",
-             "has", "", "exact"),
-            ("Complete: We ____ cousins.", "Pista: we usa have.", "have", "", "exact"),
-        ]),
-        ("Unit 4 - Describing people and ages", "Adjetivos y edades.", [
-            ("Write the opposite of 'short'.", "Pista: describe la altura.",
-             "tall", "", "exact"),
-            ("Write the opposite of 'old'.", "Pista: describe la edad.",
-             "young", "", "exact"),
-            ("Complete: How ____ is your sister?", "Pista: pregunta por la edad.",
-             "old", "", "exact"),
-            ("Complete: How old ____ they?", "Pista: dos o más personas.",
-             "are", "", "exact"),
-            ("Write 33 in words.", "Pista: thirty-...",
-             "thirty-three|thirty three", "", "exact"),
-        ]),
-    ],
-    "Conversations": [
-        ("Unit 3 - Where's the...?", "Preguntar y dar la ubicación de un lugar.", [
-            ("A: Where's the pharmacy?  B: It's ____ the street.",
-             "Significa: al otro lado de la calle.", "across", "", "exact"),
-            ("A: Where's the bookstore?  B: It's ____ the school.",
-             "Expresiones útiles: next to, between, across the street.",
-             "next to", "", "exact"),
-            ("A: Where's the restaurant?  B: It's ____ the street.",
-             "Significa: más adelante por la misma calle.", "down", "", "exact"),
-            ("A: How do I get to the bank?  B: ____ across the street.",
-             "Imperativo: ir a pie.", "walk", "", "exact"),
-        ]),
-        ("Unit 3 - Getting around", "Hablar del transporte.", [
-            ("A: How do you go to work?  B: I go ____ bus.",
-             "BY + transporte.", "by", "", "exact"),
-            ("A: How ____ I get to the school?  B: Take the bus.",
-             "Pregunta para pedir direcciones.", "do", "", "exact"),
-            ("A: Do you drive?  B: No. I ____ the subway.",
-             "Verbo para subirse a un transporte público.", "take", "", "exact"),
-        ]),
-        ("Unit 4 - Talking about family", "Conversar sobre la familia.", [
-            ("A: Who is he?  B: ____ my dad.",
-             "Forma corta de He is.", "he's|he is", "", "exact"),
-            ("A: How old is your sister?  B: ____ 18.",
-             "Forma corta de She is.", "she's|she is", "", "exact"),
-            ("A: Who are they?  B: ____ my sisters.",
-             "Forma corta de They are.", "they're|they are", "", "exact"),
-            ("A: Does she have a brother?  B: Yes, she ____ one brother.",
-             "she usa has.", "has", "", "exact"),
-        ]),
-    ],
-}
-
-for _category, _topics in UNITS_3_4.items():
-    SEED[_category].extend(_topics)
-
-# 25 ejercicios por apartado en cada unidad (están en units_data.py)
-from units_data import EXTRA_UNITS_3_4  # noqa: E402
-
-for _category, _topics in EXTRA_UNITS_3_4.items():
-    SEED[_category].extend(_topics)
+class ChatBubble(BoxLayout):
+    sender = StringProperty("")
+    msg = StringProperty("")
+    bubble_bg = ListProperty([0.125, 0.157, 0.247, 1])
 
 
 # --------------------------------------------------------------------------
-# Utilidades
+# Carga de módulos del proyecto
+# --------------------------------------------------------------------------
+from book_units import BOOK_UNITS  # noqa: E402
+from pdf_importer import BookImporter  # noqa: E402
+from online_chat import OnlineChatClient  # noqa: E402
+
+SEED = {cat: [] for cat in CATEGORIES}
+for _cat, _topics in BOOK_UNITS.items():
+    SEED[_cat].extend(_topics)
+
+try:
+    from units_data import EXTRA_UNITS_3_4  # noqa: E402
+    for _cat, _topics in EXTRA_UNITS_3_4.items():
+        SEED[_cat].extend(_topics)
+except ImportError:
+    pass
+
+
+# --------------------------------------------------------------------------
+# Utilidades de validación
 # --------------------------------------------------------------------------
 def normalize(text):
-    """Minúsculas, sin acentos ni puntuación, espacios colapsados."""
     text = unicodedata.normalize("NFKD", text or "")
     text = "".join(c for c in text if not unicodedata.combining(c)).lower()
-    text = re.sub(r"[^\w\s':]", " ", text.replace("’", "'"))
+    text = re.sub(r"[^\w\s':-]", " ", text.replace("’", "'"))
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -481,8 +199,8 @@ KV = r"""
 #:set C_TEXT (0.95, 0.97, 1, 1)
 #:set C_MUTED (0.62, 0.69, 0.80, 1)
 #:set C_PRIMARY (0.30, 0.62, 0.98, 1)
+#:set INFO_COLOR (0.62, 0.80, 1, 1)
 
-# ---------------------------------------------------------------- base
 <Page@BoxLayout>:
     orientation: 'vertical'
     padding: dp(16)
@@ -504,7 +222,7 @@ KV = r"""
 
 <Section@Label>:
     size_hint_y: None
-    height: dp(28)
+    height: dp(26)
     bold: True
     font_size: '12sp'
     color: C_MUTED
@@ -532,9 +250,6 @@ KV = r"""
             pos: self.pos
             size: self.size
             radius: [dp(12)]
-        # IMPORTANTE: TextInput pinta su texto con el último Color de canvas.before.
-        # Hay que devolverle su color después de dibujar el fondo; si no, el texto
-        # sale del mismo color que el fondo y no se ve.
         Color:
             rgba: self.disabled_foreground_color if self.disabled else (self.hint_text_color if not self.text and not self.focus else self.foreground_color)
     canvas.after:
@@ -543,7 +258,6 @@ KV = r"""
         Line:
             rounded_rectangle: (self.x, self.y, self.width, self.height, dp(12))
             width: 1.1
-        # El cursor propio original queda tapado por el fondo, así que se dibuja aquí.
         Color:
             rgba: C_PRIMARY if self.focus else (0, 0, 0, 0)
         Rectangle:
@@ -665,6 +379,61 @@ KV = r"""
             pos: self.right - dp(70), self.top - dp(70)
             size: dp(50), dp(50)
 
+<ModeCard>:
+    size_hint_y: None
+    height: dp(96)
+    background_normal: ''
+    background_down: ''
+    background_color: 0, 0, 0, 0
+    color: 1, 1, 1, 1
+    markup: True
+    halign: 'left'
+    valign: 'middle'
+    text_size: self.width - dp(40), self.height - dp(24)
+    canvas.before:
+        Color:
+            rgba: self.bg if self.state == 'normal' else (self.bg[0] * .82, self.bg[1] * .82, self.bg[2] * .82, 1)
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(20)]
+        Color:
+            rgba: 1, 1, 1, 0.12
+        Ellipse:
+            pos: self.right - dp(76), self.center_y - dp(28)
+            size: dp(56), dp(56)
+
+<ChatBubble>:
+    orientation: 'vertical'
+    size_hint_y: None
+    height: self.minimum_height
+    padding: dp(12)
+    spacing: dp(4)
+    canvas.before:
+        Color:
+            rgba: self.bubble_bg
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(14)]
+    Label:
+        text: root.sender
+        size_hint_y: None
+        height: dp(18)
+        font_size: '12sp'
+        bold: True
+        color: C_PRIMARY
+        text_size: self.width, None
+        halign: 'left'
+    Label:
+        text: root.msg
+        size_hint_y: None
+        height: self.texture_size[1] + dp(4)
+        font_size: '15sp'
+        color: C_TEXT
+        text_size: self.width, None
+        halign: 'left'
+
 <StatRow>:
     orientation: 'vertical'
     size_hint_y: None
@@ -743,8 +512,8 @@ KV = r"""
         halign: 'left'
         valign: 'middle'
 
-# ---------------------------------------------------------------- inicio
-<MainScreen>:
+# ---------------------------------------------------------------- PANEL PRINCIPAL
+<HomeScreen>:
     Page:
         ScrollView:
             do_scroll_x: False
@@ -758,7 +527,7 @@ KV = r"""
                 BoxLayout:
                     orientation: 'vertical'
                     size_hint_y: None
-                    height: dp(78)
+                    height: dp(76)
                     Label:
                         text: 'English Quiz'
                         bold: True
@@ -768,7 +537,7 @@ KV = r"""
                         halign: 'left'
                         valign: 'bottom'
                     Label:
-                        text: 'Nivel A1  •  Learn, practice, improve'
+                        text: 'Top Notch Fundamentals  •  Nivel A1'
                         font_size: '14sp'
                         color: C_MUTED
                         text_size: self.size
@@ -777,12 +546,12 @@ KV = r"""
                 Card:
                     BoxLayout:
                         size_hint_y: None
-                        height: dp(66)
+                        height: dp(62)
                         spacing: dp(10)
                         BoxLayout:
                             orientation: 'vertical'
                             Label:
-                                text: 'TU PROGRESO'
+                                text: 'TU PROGRESO GENERAL'
                                 bold: True
                                 font_size: '12sp'
                                 color: C_MUTED
@@ -793,15 +562,15 @@ KV = r"""
                                 id: home_pct
                                 text: '0%'
                                 bold: True
-                                font_size: '34sp'
+                                font_size: '32sp'
                                 color: C_TEXT
                                 text_size: self.size
                                 halign: 'left'
                                 valign: 'middle'
                         RBtn:
-                            text: 'Detalles'
+                            text: 'Estadísticas'
                             size_hint_x: None
-                            width: dp(96)
+                            width: dp(112)
                             height: dp(40)
                             pos_hint: {'center_y': .5}
                             bg: C_SURFACE2
@@ -822,7 +591,54 @@ KV = r"""
                         height: dp(8)
                         fill: C_PRIMARY
                 Section:
-                    text: 'ELIGE UN ÁREA'
+                    text: '¿QUÉ QUIERES HACER HOY?'
+                ModeCard:
+                    text: '[b][size=20sp]1. Práctica Guiada[/size][/b]\n[size=13sp][color=dfe9f7]Aprende con ejemplos, reglas, audio e imágenes[/color][/size]'
+                    bg: 0.20, 0.47, 0.93, 1
+                    on_release: root.go('practice_hub')
+                ModeCard:
+                    text: '[b][size=20sp]2. Evaluación (Quiz)[/size][/b]\n[size=13sp][color=dfe9f7]Ponte a prueba • mínimo 25 preguntas[/color][/size]'
+                    bg: 0.55, 0.36, 0.96, 1
+                    on_release: root.go('exam')
+                ModeCard:
+                    text: '[b][size=20sp]3. Conversación Online[/size][/b]\n[size=13sp][color=dfe9f7]Sala con código de amigo • Chat y voz a distancia[/color][/size]'
+                    bg: 0.13, 0.67, 0.50, 1
+                    on_release: root.go('chat')
+
+# ---------------------------------------------------------------- HUB DE PRÁCTICA
+<PracticeHubScreen>:
+    Page:
+        BoxLayout:
+            size_hint_y: None
+            height: dp(48)
+            spacing: dp(12)
+            RBtn:
+                text: '<'
+                size_hint_x: None
+                width: dp(48)
+                height: dp(48)
+                font_size: '20sp'
+                bg: C_SURFACE2
+                on_release: root.go_back()
+            Label:
+                text: 'Práctica por Áreas'
+                font_size: '22sp'
+                bold: True
+                color: C_TEXT
+                text_size: self.size
+                halign: 'left'
+                valign: 'middle'
+        ScrollView:
+            do_scroll_x: False
+            bar_width: 0
+            BoxLayout:
+                orientation: 'vertical'
+                size_hint_y: None
+                height: self.minimum_height
+                spacing: dp(12)
+                padding: [0, dp(4), 0, dp(12)]
+                Section:
+                    text: 'ELIGE UN APARTADO DEL LIBRO'
                 GridLayout:
                     cols: 2
                     spacing: dp(12)
@@ -851,11 +667,11 @@ KV = r"""
                         bg: 0.08, 0.64, 0.74, 1
                         on_release: root.open_area('Conversations')
                     Tile:
-                        text: '[b][size=19sp]Manage[/size][/b]\n[size=12sp][color=dfe9f7]Temas y ejercicios[/color][/size]'
+                        text: '[b][size=19sp]Manage / PDF[/size][/b]\n[size=12sp][color=dfe9f7]Importar libro IA[/color][/size]'
                         bg: 0.30, 0.35, 0.46, 1
                         on_release: root.go('admin')
 
-# ---------------------------------------------------------------- práctica
+# ---------------------------------------------------------------- PRÁCTICA DE ÁREA
 <AreaScreen>:
     Page:
         BoxLayout:
@@ -869,7 +685,7 @@ KV = r"""
                 height: dp(48)
                 font_size: '20sp'
                 bg: C_SURFACE2
-                on_release: root.go_home()
+                on_release: root.go_back()
             Label:
                 id: area_title
                 text: 'Practice'
@@ -916,7 +732,15 @@ KV = r"""
                 spacing: dp(12)
                 padding: [0, dp(4), 0, dp(16)]
                 Card:
-                    spacing: dp(8)
+                    spacing: dp(10)
+                    Image:
+                        id: ex_image
+                        source: ''
+                        size_hint_y: None
+                        height: 0
+                        opacity: 0
+                        allow_stretch: True
+                        keep_ratio: True
                     WrapLabel:
                         id: prompt
                         text: 'Tu ejercicio aparecerá aquí.'
@@ -949,7 +773,7 @@ KV = r"""
                     id: answer
                     hint_text: 'Escribe tu respuesta aquí...'
                     multiline: True
-                    height: dp(100)
+                    height: dp(96)
                 RBtn:
                     id: check_btn
                     text: 'Check answer'
@@ -972,7 +796,208 @@ KV = r"""
                     id: feedback
                     text: ''
 
-# ---------------------------------------------------------------- progreso
+# ---------------------------------------------------------------- MODO EVALUACIÓN (QUIZ)
+<ExamScreen>:
+    Page:
+        BoxLayout:
+            size_hint_y: None
+            height: dp(48)
+            spacing: dp(12)
+            RBtn:
+                text: '<'
+                size_hint_x: None
+                width: dp(48)
+                height: dp(48)
+                font_size: '20sp'
+                bg: C_SURFACE2
+                on_release: root.go_home()
+            Label:
+                text: 'Evaluación (Quiz)'
+                font_size: '22sp'
+                bold: True
+                color: C_TEXT
+                text_size: self.size
+                halign: 'left'
+                valign: 'middle'
+        BoxLayout:
+            orientation: 'vertical'
+            size_hint_y: None
+            height: self.minimum_height
+            spacing: dp(10)
+            RSpinner:
+                id: unit_spinner
+                text: 'Todas las Unidades (Mixto)'
+                values: ['Todas las Unidades (Mixto)', 'Unit 1', 'Unit 2', 'Unit 3', 'Unit 4', 'Unit 5', 'Unit 6', 'Unit 7']
+            RBtn:
+                text: 'Comenzar Evaluación (25 preguntas)'
+                bg: 0.55, 0.36, 0.96, 1
+                on_release: root.start_exam()
+        Label:
+            id: exam_progress
+            text: ''
+            size_hint_y: None
+            height: dp(20)
+            font_size: '13sp'
+            color: C_MUTED
+            text_size: self.size
+            halign: 'left'
+            valign: 'middle'
+        SoftBar:
+            id: exam_bar
+            size_hint_y: None
+            height: dp(8)
+            maximum: 10
+            value: 0
+            fill: 0.55, 0.36, 0.96, 1
+        ScrollView:
+            do_scroll_x: False
+            bar_width: dp(3)
+            BoxLayout:
+                orientation: 'vertical'
+                size_hint_y: None
+                height: self.minimum_height
+                spacing: dp(12)
+                padding: [0, dp(4), 0, dp(16)]
+                Card:
+                    Image:
+                        id: exam_image
+                        source: ''
+                        size_hint_y: None
+                        height: 0
+                        opacity: 0
+                        allow_stretch: True
+                        keep_ratio: True
+                    WrapLabel:
+                        id: exam_cat
+                        text: 'MODO EXAMEN'
+                        color: 0.75, 0.60, 1, 1
+                        font_size: '12sp'
+                        bold: True
+                    WrapLabel:
+                        id: exam_prompt
+                        text: 'Selecciona una unidad arriba y pulsa Comenzar Evaluación.'
+                        color: C_TEXT
+                        font_size: '19sp'
+                        bold: True
+                    WrapLabel:
+                        id: exam_passage
+                        text: ''
+                        color: C_MUTED
+                        font_size: '15sp'
+                RBtn:
+                    id: exam_audio_btn
+                    text: 'Escuchar audio'
+                    bg: 0.45, 0.30, 0.85, 1
+                    disabled: True
+                    opacity: 0
+                    height: 0
+                    on_release: root.play_exam_audio()
+                Field:
+                    id: exam_answer
+                    hint_text: 'Tu respuesta...'
+                    disabled: True
+                RBtn:
+                    id: exam_submit_btn
+                    text: 'Siguiente pregunta  >'
+                    bg: 0.55, 0.36, 0.96, 1
+                    disabled: True
+                    on_release: root.submit_and_next()
+                Banner:
+                    id: exam_result
+                    text: ''
+
+# ---------------------------------------------------------------- MODO CONVERSACIÓN EN LÍNEA
+<ChatScreen>:
+    Page:
+        BoxLayout:
+            size_hint_y: None
+            height: dp(48)
+            spacing: dp(12)
+            RBtn:
+                text: '<'
+                size_hint_x: None
+                width: dp(48)
+                height: dp(48)
+                font_size: '20sp'
+                bg: C_SURFACE2
+                on_release: root.go_home()
+            Label:
+                text: 'Conversación Online'
+                font_size: '21sp'
+                bold: True
+                color: C_TEXT
+                text_size: self.size
+                halign: 'left'
+                valign: 'middle'
+        Card:
+            padding: dp(12)
+            spacing: dp(8)
+            BoxLayout:
+                size_hint_y: None
+                height: dp(44)
+                spacing: dp(6)
+                Field:
+                    id: my_name
+                    hint_text: 'Tu nombre'
+                    height: dp(44)
+                Field:
+                    id: friend_code
+                    hint_text: 'Código (ej. JUAN-24)'
+                    height: dp(44)
+                RBtn:
+                    text: 'Unirse'
+                    size_hint_x: None
+                    width: dp(80)
+                    height: dp(44)
+                    bg: 0.13, 0.67, 0.50, 1
+                    on_release: root.connect_friend()
+            WrapLabel:
+                id: topic_guide
+                text: 'Tema sugerido: Unit 1 - Ask your friend name and occupation.'
+                color: INFO_COLOR
+                font_size: '13sp'
+            RBtn:
+                text: 'Cambiar tema del libro'
+                height: dp(36)
+                font_size: '13sp'
+                bg: C_SURFACE2
+                on_release: root.next_topic_guide()
+        ScrollView:
+            id: chat_scroll
+            do_scroll_x: False
+            bar_width: dp(3)
+            BoxLayout:
+                id: chat_box
+                orientation: 'vertical'
+                size_hint_y: None
+                height: self.minimum_height
+                spacing: dp(8)
+                padding: [0, dp(4), 0, dp(8)]
+        Banner:
+            id: mic_status
+            text: ''
+        BoxLayout:
+            size_hint_y: None
+            height: dp(50)
+            spacing: dp(8)
+            RBtn:
+                id: mic_btn
+                text: 'Voz'
+                size_hint_x: None
+                width: dp(68)
+                bg: 0.85, 0.28, 0.36, 1
+                on_release: root.start_voice_input()
+            Field:
+                id: chat_input
+                hint_text: 'Escribe o dicta en inglés...'
+            RBtn:
+                text: 'Enviar'
+                size_hint_x: None
+                width: dp(82)
+                bg: C_PRIMARY
+                on_release: root.send_message()
+
+# ---------------------------------------------------------------- PROGRESO
 <StatsScreen>:
     Page:
         BoxLayout:
@@ -986,7 +1011,7 @@ KV = r"""
                 height: dp(48)
                 font_size: '20sp'
                 bg: C_SURFACE2
-                on_release: root.manager.current = 'home'
+                on_release: root.go_home()
             Label:
                 text: 'My progress'
                 font_size: '22sp'
@@ -1010,7 +1035,7 @@ KV = r"""
             bg: 0.62, 0.20, 0.22, 1
             on_release: root.confirm_reset()
 
-# ---------------------------------------------------------------- administración
+# ---------------------------------------------------------------- ADMINISTRACIÓN + PDF IA + FIREBASE
 <AdminScreen>:
     Page:
         BoxLayout:
@@ -1024,10 +1049,10 @@ KV = r"""
                 height: dp(48)
                 font_size: '20sp'
                 bg: C_SURFACE2
-                on_release: root.manager.current = 'home'
+                on_release: root.go_back()
             Label:
-                text: 'Manage topics'
-                font_size: '22sp'
+                text: 'Manage & Importar PDF'
+                font_size: '21sp'
                 bold: True
                 color: C_TEXT
                 text_size: self.size
@@ -1044,7 +1069,38 @@ KV = r"""
                 padding: [0, dp(4), 0, dp(24)]
                 Card:
                     Section:
-                        text: 'ÁREA DE APRENDIZAJE'
+                        text: 'CHAT ONLINE (FIREBASE REALTIME URL)'
+                    Field:
+                        id: firebase_url_input
+                        hint_text: 'https://tu-proyecto-default-rtdb.firebaseio.com'
+                    RBtn:
+                        text: 'Guardar URL de Chat Online'
+                        bg: C_SURFACE2
+                        on_release: root.save_firebase_url()
+                Card:
+                    Section:
+                        text: 'IMPORTAR LIBRO PDF AUTOMÁTICAMENTE (IA)'
+                    WrapLabel:
+                        text: 'Sube un PDF desde tu celular: la IA extraerá las lecciones, recortará las imágenes y creará los ejercicios y exámenes.'
+                        color: C_MUTED
+                        font_size: '13sp'
+                    Field:
+                        id: gemini_key
+                        hint_text: 'Pega tu Gemini API Key (se guarda aquí)'
+                        password: True
+                    Field:
+                        id: max_pages_input
+                        hint_text: 'Máximo de páginas a procesar (ej. 10)'
+                        text: '10'
+                        input_filter: 'int'
+                    RBtn:
+                        id: import_pdf_btn
+                        text: 'Seleccionar libro PDF e Importar'
+                        bg: 0.13, 0.67, 0.50, 1
+                        on_release: root.pick_and_import_pdf()
+                Card:
+                    Section:
+                        text: 'ÁREA DE APRENDIZAJE (MANUAL)'
                     RSpinner:
                         id: category
                         text: 'Reading'
@@ -1052,10 +1108,10 @@ KV = r"""
                         on_text: root.refresh_topics()
                 Card:
                     Section:
-                        text: 'NUEVO TEMA'
+                        text: 'NUEVO TEMA MANUAL'
                     Field:
                         id: topic_name
-                        hint_text: 'Nombre del tema (ej. Family)'
+                        hint_text: 'Nombre del tema (ej. Unit 8 - Home)'
                     Field:
                         id: topic_description
                         hint_text: 'Descripción corta'
@@ -1067,7 +1123,7 @@ KV = r"""
                         on_release: root.save_topic()
                 Card:
                     Section:
-                        text: 'NUEVO EJERCICIO'
+                        text: 'NUEVO EJERCICIO MANUAL'
                     RSpinner:
                         id: topic_pick
                         text: 'Select a topic'
@@ -1079,12 +1135,12 @@ KV = r"""
                         height: dp(76)
                     Field:
                         id: ex_passage
-                        hint_text: 'Texto o transcripción (en Listening se lee en voz alta)'
+                        hint_text: 'Texto, pista o transcripción'
                         multiline: True
                         height: dp(76)
                     Field:
                         id: ex_answer
-                        hint_text: 'Respuesta (alternativas con |  ej: is|it is)'
+                        hint_text: 'Respuesta (alternativas con |)'
                     RSpinner:
                         id: ex_mode
                         text: 'exact'
@@ -1099,20 +1155,21 @@ KV = r"""
                     on_release: root.confirm_delete_topic()
                 Banner:
                     id: status
-                    text: 'Los datos se guardan en este dispositivo.'
+                    text: 'Los datos e imágenes se guardan en este dispositivo.'
                     color: C_MUTED
 """
 
 
 # --------------------------------------------------------------------------
-# Base de datos
+# Base de datos SQLite
 # --------------------------------------------------------------------------
 class Database:
     def __init__(self, path):
-        self.conn = sqlite3.connect(path)
+        self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.create_tables()
+        self.migrate()
         self.seed()
 
     def create_tables(self):
@@ -1131,6 +1188,7 @@ class Database:
             answer TEXT NOT NULL,
             audio_file TEXT DEFAULT '',
             mode TEXT DEFAULT 'exact',
+            image_file TEXT DEFAULT '',
             FOREIGN KEY(topic_id) REFERENCES topics(id) ON DELETE CASCADE)""")
         c.execute("""CREATE TABLE IF NOT EXISTS attempts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1138,14 +1196,28 @@ class Database:
             correct INTEGER NOT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(exercise_id) REFERENCES exercises(id) ON DELETE CASCADE)""")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_topics_cat ON topics(category)")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_ex_topic ON exercises(topic_id)")
+        c.execute("""CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT DEFAULT '')""")
         c.commit()
 
+    def migrate(self):
+        cols = [r["name"] for r in self.conn.execute("PRAGMA table_info(exercises)").fetchall()]
+        if "image_file" not in cols:
+            self.conn.execute("ALTER TABLE exercises ADD COLUMN image_file TEXT DEFAULT ''")
+            self.conn.commit()
+
+    def get_setting(self, key, default=""):
+        row = self.conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
+
+    def set_setting(self, key, value):
+        self.conn.execute(
+            "INSERT INTO settings(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+        self.conn.commit()
+
     def seed(self):
-        """Carga los temas incluidos. Solo agrega los que faltan, así una
-        actualización de la app suma unidades nuevas sin duplicar nada ni
-        tocar el progreso. Cada vez que se agregue contenido, sube SEED_VERSION."""
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
         if version >= SEED_VERSION:
             return
@@ -1154,16 +1226,13 @@ class Database:
                 if self.topic_exists(category, name):
                     continue
                 tid = self.add_topic(category, name, desc)
-                for prompt, passage, answer, audio, mode in exercises:
-                    self.add_exercise(tid, prompt, passage, answer, audio, mode)
-        for old, new in PASSAGE_FIXES:
-            self.conn.execute("UPDATE exercises SET passage=? WHERE passage=?", (new, old))
-        for old, new in PROMPT_FIXES:
-            self.conn.execute("UPDATE exercises SET prompt=? WHERE prompt=?", (new, old))
+                for item in exercises:
+                    prompt, passage, answer, audio, mode = item[:5]
+                    image = item[5] if len(item) > 5 else ""
+                    self.add_exercise(tid, prompt, passage, answer, audio, mode, image)
         self.conn.execute("PRAGMA user_version = %d" % SEED_VERSION)
         self.conn.commit()
 
-    # --- temas / ejercicios
     def topics(self, category):
         return self.conn.execute(
             "SELECT * FROM topics WHERE category=? ORDER BY name", (category,)).fetchall()
@@ -1171,6 +1240,30 @@ class Database:
     def exercises(self, topic_id):
         return self.conn.execute(
             "SELECT * FROM exercises WHERE topic_id=? ORDER BY id", (topic_id,)).fetchall()
+
+    def exam_exercises(self, unit_filter="Todas", limit=EXAM_QUESTION_COUNT):
+        if unit_filter.startswith("Unit"):
+            selected_rows = self.conn.execute("""
+                SELECT e.*, t.category, t.name AS topic_name
+                FROM exercises e JOIN topics t ON t.id = e.topic_id
+                WHERE t.name LIKE ?""", (unit_filter + "%",)).fetchall()
+            items = [dict(r) for r in selected_rows]
+            random.shuffle(items)
+            if len(items) < limit:
+                other_rows = self.conn.execute("""
+                    SELECT e.*, t.category, t.name AS topic_name
+                    FROM exercises e JOIN topics t ON t.id = e.topic_id
+                    WHERE t.name NOT LIKE ?""", (unit_filter + "%",)).fetchall()
+                other_items = [dict(r) for r in other_rows]
+                random.shuffle(other_items)
+                items.extend(other_items[:limit - len(items)])
+        else:
+            rows = self.conn.execute("""
+                SELECT e.*, t.category, t.name AS topic_name
+                FROM exercises e JOIN topics t ON t.id = e.topic_id""").fetchall()
+            items = [dict(r) for r in rows]
+            random.shuffle(items)
+        return items[:limit]
 
     def add_topic(self, category, name, description=""):
         cur = self.conn.execute(
@@ -1184,17 +1277,16 @@ class Database:
             "SELECT 1 FROM topics WHERE category=? AND lower(name)=lower(?)",
             (category, name)).fetchone() is not None
 
-    def add_exercise(self, topic_id, prompt, passage, answer, audio="", mode="exact"):
+    def add_exercise(self, topic_id, prompt, passage, answer, audio="", mode="exact", image=""):
         self.conn.execute(
-            "INSERT INTO exercises(topic_id,prompt,passage,answer,audio_file,mode) "
-            "VALUES(?,?,?,?,?,?)", (topic_id, prompt, passage, answer, audio, mode))
+            "INSERT INTO exercises(topic_id,prompt,passage,answer,audio_file,mode,image_file) "
+            "VALUES(?,?,?,?,?,?,?)", (topic_id, prompt, passage, answer, audio, mode, image))
         self.conn.commit()
 
     def delete_topic(self, topic_id):
         self.conn.execute("DELETE FROM topics WHERE id=?", (topic_id,))
         self.conn.commit()
 
-    # --- progreso
     def record_attempt(self, exercise_id, correct):
         self.conn.execute("INSERT INTO attempts(exercise_id,correct) VALUES(?,?)",
                           (exercise_id, 1 if correct else 0))
@@ -1215,9 +1307,19 @@ class Database:
         self.conn.commit()
 
 
-# --------------------------------------------------------------------------
-# Utilidad de confirmación
-# --------------------------------------------------------------------------
+def resolve_image_path(img_name):
+    """Busca primero en imágenes recortadas por IA y luego en assets/images/."""
+    if not img_name:
+        return ""
+    user_img = os.path.join(App.get_running_app().user_images_dir, img_name)
+    if os.path.exists(user_img):
+        return user_img
+    bundled_img = os.path.join(BUNDLED_IMAGE_DIR, img_name)
+    if os.path.exists(bundled_img):
+        return bundled_img
+    return ""
+
+
 def confirm(title, message, on_yes):
     box = BoxLayout(orientation="vertical", spacing=dp(14), padding=dp(16))
     lbl = Label(text=message, halign="center", valign="middle", color=TEXT)
@@ -1238,19 +1340,9 @@ def confirm(title, message, on_yes):
 
 
 # --------------------------------------------------------------------------
-# Pantallas
+# Voz (TTS y Micrófono nativo Android) + Selector nativo de PDF Android
 # --------------------------------------------------------------------------
-# --------------------------------------------------------------------------
-# Voz: lee los textos en voz alta con la voz del propio dispositivo
-# --------------------------------------------------------------------------
-MSG_NO_ENGINE = ("No se pudo iniciar la voz del teléfono. Revisa en Ajustes > Idioma > "
-                 "Texto a voz que haya un motor instalado.")
-MSG_NO_ENGLISH = ("Tu teléfono no tiene la voz en inglés. Ve a Ajustes > Idioma > "
-                  "Texto a voz y descarga inglés (EE. UU.).")
-
-
 def spoken_text(category, passage):
-    """Líneas que se leen en voz alta: sin 'A:'/'B:' ni 'Modelo:'."""
     text = passage or ""
     if category == "Speaking" and ":" in text:
         head, tail = text.split(":", 1)
@@ -1261,14 +1353,7 @@ def spoken_text(category, passage):
     return [ln.strip() for ln in text.split("\n") if ln.strip()]
 
 
-def _detail(error):
-    """Texto corto con el tipo y el mensaje de un error."""
-    return ("%s: %s" % (type(error).__name__, str(error))).replace("\n", " ")[:160]
-
-
 class Speaker:
-    """Texto a voz. En Android usa TextToSpeech; en escritorio, la voz del sistema."""
-
     def __init__(self):
         self.error = ""
         self._engine = None
@@ -1277,7 +1362,6 @@ class Speaker:
         if platform == "android":
             self._init_android()
 
-    # --- Android
     def _init_android(self):
         self._status = None
         try:
@@ -1298,132 +1382,203 @@ class Speaker:
             activity = autoclass("org.kivy.android.PythonActivity").mActivity
             self._tts_cls = autoclass("android.speech.tts.TextToSpeech")
             self._locale = autoclass("java.util.Locale")
-            self._listener = InitListener(self._on_init)  # guardar la referencia
+            self._listener = InitListener(self._on_init)
             self._engine = self._tts_cls(activity, self._listener)
         except Exception as e:
             self._engine = None
-            self.error = "%s\nDetalle: %s" % (MSG_NO_ENGINE, _detail(e))
-            print("[voz] error al crear TextToSpeech:", _detail(e))
+            self.error = "No se pudo iniciar la voz: %s" % e
 
     def _on_init(self, status):
-        # Lo llama Android cuando el motor termina de iniciar; solo se guarda el
-        # resultado y el resto se completa en _finish_init() (hilo principal).
         self._status = status
-        print("[voz] onInit status =", status)
 
     def _finish_init(self):
         if self._ready or self._status is None or self._engine is None:
             return
-        try:
-            if self._status != self._tts_cls.SUCCESS:
-                self._engine = None
-                self.error = ("%s\nDetalle: el motor respondió con el código %s. En Android 11 o "
-                              "superior esto pasa si la app apunta a una API nueva; usa "
-                              "android.api = 29 en buildozer.spec." % (MSG_NO_ENGINE, self._status))
-                return
-            if self._engine.setLanguage(self._locale.US) < 0:  # -1 faltan datos, -2 sin soporte
-                self.error = MSG_NO_ENGLISH
+        if self._status == self._tts_cls.SUCCESS:
+            self._engine.setLanguage(self._locale.US)
             self._ready = True
-        except Exception as e:
-            self._engine = None
-            self.error = "%s\nDetalle: %s" % (MSG_NO_ENGINE, _detail(e))
-            print("[voz] error al terminar de iniciar:", _detail(e))
 
-    def _speak_android(self, lines, slow):
-        engine, cls = self._engine, self._tts_cls
-        engine.setSpeechRate(0.6 if slow else 0.95)
+    def speak(self, lines, slow=False):
+        self.stop()
+        if not lines:
+            return "Sin texto para leer."
+        if platform != "android":
+            return self._speak_desktop(lines, slow)
+        if not self._ready:
+            self._finish_init()
+        if not self._ready or self._engine is None:
+            return "Iniciando voz, intenta de nuevo en un segundo."
+        self._engine.setSpeechRate(0.6 if slow else 0.95)
         for i, line in enumerate(lines):
-            mode = cls.QUEUE_FLUSH if i == 0 else cls.QUEUE_ADD
+            mode = self._tts_cls.QUEUE_FLUSH if i == 0 else self._tts_cls.QUEUE_ADD
             try:
-                engine.speak(line, mode, None, None)
+                self._engine.speak(line, mode, None, None)
             except Exception:
-                engine.speak(line, mode, None)          # firma antigua (API < 21)
-            try:
-                engine.playSilentUtterance(450, cls.QUEUE_ADD, None)  # pausa entre frases
-            except Exception:
-                pass
+                self._engine.speak(line, mode, None)
+        return ""
 
-    # --- Escritorio (para probar en el computador)
     def _speak_desktop(self, lines, slow):
-        import shutil
         import subprocess
         text = ". ".join(lines)
-        kwargs = {"env": dict(os.environ, QUIZ_TEXT=text),
-                  "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
         if platform == "win":
             script = ("Add-Type -AssemblyName System.Speech;"
                       "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
-                      "try { $s.SelectVoiceByHints('NotSet','NotSet',0,"
-                      "[System.Globalization.CultureInfo]'en-US') } catch {};"
                       "$s.Rate = %d; $s.Speak($env:QUIZ_TEXT)" % (-3 if slow else 0))
-            cmd = ["powershell", "-NoProfile", "-Command", script]
-            kwargs["creationflags"] = 0x08000000  # sin ventana de consola
-        elif platform == "macosx":
-            cmd = ["say", "-v", "Samantha", "-r", "120" if slow else "180", text]
-        else:
-            exe = shutil.which("espeak-ng") or shutil.which("espeak")
-            if exe:
-                cmd = [exe, "-v", "en-us", "-s", "115" if slow else "150", text]
-            elif shutil.which("spd-say"):
-                cmd = ["spd-say", "-l", "en", "-r", "-40" if slow else "0", text]
-            else:
-                return "En este computador no hay voz instalada (instala espeak-ng o prueba en el celular)."
-        try:
-            self._proc = subprocess.Popen(cmd, **kwargs)
-        except Exception:
-            return "No se pudo iniciar la voz de este computador."
-        return ""
-
-    # --- API pública
-    def speak(self, lines, slow=False):
-        """Lee las líneas. Devuelve '' si todo va bien, o un mensaje para mostrar."""
-        self.stop()
-        if not lines:
-            return "Este ejercicio no tiene texto para leer."
-        if platform != "android":
-            return self._speak_desktop(lines, slow)
-        if self._engine is None:
-            return self.error or MSG_NO_ENGINE
-        if not self._ready:
-            self._finish_init()
-            if self._engine is None:
-                return self.error or MSG_NO_ENGINE
-            if not self._ready:
-                return "La voz se está iniciando. Toca de nuevo en un segundo."
-        if self.error:
-            return self.error
-        try:
-            self._speak_android(lines, slow)
-        except Exception as e:
-            print("[voz] error al leer:", _detail(e))
-            return "No se pudo reproducir la voz.\nDetalle: %s" % _detail(e)
+            try:
+                self._proc = subprocess.Popen(
+                    ["powershell", "-NoProfile", "-Command", script],
+                    env=dict(os.environ, QUIZ_TEXT=text), creationflags=0x08000000)
+            except Exception:
+                return "Voz no disponible en este equipo."
         return ""
 
     def stop(self):
-        if self._engine is not None and self._ready:
+        if self._engine and self._ready:
             try:
                 self._engine.stop()
             except Exception:
                 pass
-        if self._proc is not None and self._proc.poll() is None:
+        if self._proc and self._proc.poll() is None:
             try:
                 self._proc.terminate()
             except Exception:
                 pass
-        self._proc = None
 
     def shutdown(self):
         self.stop()
-        if self._engine is not None:
+        if self._engine:
             try:
                 self._engine.shutdown()
             except Exception:
                 pass
 
 
-class MainScreen(Screen):
+class VoiceRecognizer:
+    def listen(self, on_result, on_error):
+        if platform != "android":
+            on_error("El micrófono funciona en Android. En PC escribe el mensaje.")
+            return
+        try:
+            from android.permissions import request_permissions, Permission
+            from jnius import autoclass, PythonJavaClass, java_method
+            from android.runnable import run_on_ui_thread
+
+            request_permissions([Permission.RECORD_AUDIO])
+
+            SpeechRecognizer = autoclass("android.speech.SpeechRecognizer")
+            RecognizerIntent = autoclass("android.speech.RecognizerIntent")
+            Intent = autoclass("android.content.Intent")
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+
+            class Listener(PythonJavaClass):
+                __javainterfaces__ = ["android/speech/RecognitionListener"]
+                __javacontext__ = "app"
+
+                @java_method("(Landroid/os/Bundle;)V")
+                def onResults(self, results):
+                    matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    if matches and matches.size() > 0:
+                        text = matches.get(0)
+                        Clock.schedule_once(lambda *_: on_result(text), 0)
+
+                @java_method("(I)V")
+                def onError(self, error):
+                    Clock.schedule_once(lambda *_: on_error("No se escuchó audio (código %d)." % error), 0)
+
+                @java_method("(Landroid/os/Bundle;)V")
+                def onReadyForSpeech(self, params): pass
+
+                @java_method("()V")
+                def onBeginningOfSpeech(self): pass
+
+                @java_method("(F)V")
+                def onRmsChanged(self, rmsdB): pass
+
+                @java_method("([B)V")
+                def onBufferReceived(self, buffer): pass
+
+                @java_method("()V")
+                def onEndOfSpeech(self): pass
+
+                @java_method("(Landroid/os/Bundle;)V")
+                def onPartialResults(self, partialResults): pass
+
+                @java_method("(ILandroid/os/Bundle;)V")
+                def onEvent(self, eventType, params): pass
+
+            @run_on_ui_thread
+            def _start():
+                self._sr = SpeechRecognizer.createSpeechRecognizer(activity)
+                self._listener = Listener()
+                self._sr.setRecognitionListener(self._listener)
+                intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
+                self._sr.startListening(intent)
+
+            _start()
+        except Exception as e:
+            on_error("Error de micrófono: %s" % e)
+
+
+def pick_pdf_file(temp_dir, on_picked, on_error):
+    """Abre el selector nativo de archivos en Android o busca PDF local en PC."""
+    if platform != "android":
+        sample = os.path.join(BASE_DIR, "top-notch-fundamentals-a.pdf")
+        if os.path.exists(sample):
+            on_picked(sample)
+        else:
+            on_error("En PC coloca 'top-notch-fundamentals-a.pdf' junto a main.py.")
+        return
+
+    try:
+        from android import activity as android_activity
+        from jnius import autoclass
+
+        Intent = autoclass("android.content.Intent")
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        current_activity = PythonActivity.mActivity
+        REQ_CODE = 7412
+
+        def _on_activity_result(request_code, result_code, data):
+            if request_code != REQ_CODE:
+                return
+            android_activity.unbind(on_activity_result=_on_activity_result)
+            if result_code != -1 or data is None:
+                Clock.schedule_once(lambda *_: on_error("Selección de PDF cancelada."), 0)
+                return
+            try:
+                uri = data.getData()
+                resolver = current_activity.getContentResolver()
+                inp = resolver.openInputStream(uri)
+                dest = os.path.join(temp_dir, "imported_book.pdf")
+                with open(dest, "wb") as out_f:
+                    buf = bytearray(8192)
+                    while True:
+                        n = inp.read(buf)
+                        if n <= 0:
+                            break
+                        out_f.write(buf[:n])
+                inp.close()
+                Clock.schedule_once(lambda *_: on_picked(dest), 0)
+            except Exception as exc:
+                Clock.schedule_once(lambda *_: on_error("No se pudo leer el PDF: %s" % exc), 0)
+
+        android_activity.bind(on_activity_result=_on_activity_result)
+        intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+        intent.addCategory(Intent.CATEGORY_OPENABLE)
+        intent.setType("application/pdf")
+        current_activity.startActivityForResult(intent, REQ_CODE)
+    except Exception as e:
+        on_error("Error abriendo selector de archivos: %s" % e)
+
+
+# --------------------------------------------------------------------------
+# Pantallas
+# --------------------------------------------------------------------------
+class HomeScreen(Screen):
     def on_pre_enter(self, *args):
-        """Resumen de progreso en la parte superior del inicio."""
         data = App.get_running_app().db.stats()
         total = sum(t for t, _ in data.values())
         good = sum(g for _, g in data.values())
@@ -1431,10 +1586,16 @@ class MainScreen(Screen):
         self.ids.home_pct.text = "%d%%" % pct
         self.ids.home_detail.text = (
             "%d de %d respuestas correctas" % (good, total) if total
-            else "Aún sin resultados. ¡Empieza con cualquier área!")
+            else "Aún sin resultados. ¡Empieza en Práctica o Evaluación!")
         self.ids.home_bar.maximum = 100
         Animation(value=pct, d=0.4, t="out_quad").start(self.ids.home_bar)
 
+    def go(self, name):
+        self.manager.transition.direction = "left"
+        self.manager.current = name
+
+
+class PracticeHubScreen(Screen):
     def open_area(self, category):
         self.manager.get_screen("area").set_category(category)
         self.go("area")
@@ -1443,6 +1604,10 @@ class MainScreen(Screen):
         self.manager.transition.direction = "left"
         self.manager.current = name
 
+    def go_back(self):
+        self.manager.transition.direction = "right"
+        self.manager.current = "home"
+
 
 class AreaScreen(Screen):
     category = ""
@@ -1450,11 +1615,9 @@ class AreaScreen(Screen):
     topic_map = {}
     index = 0
     first_try = True
-    revealed = False
     correct_count = 0
     sound = None
 
-    # --- configuración
     def set_category(self, category):
         self.category = category
         ids = self.ids
@@ -1471,27 +1634,26 @@ class AreaScreen(Screen):
         ids.audio_row.disabled = not show_audio
         ids.audio_row.opacity = 1 if show_audio else 0
         ids.audio_row.height = dp(50) if show_audio else 0
-        # El color del área tiñe la barra de avance y el botón principal
         accent = list(AREA_COLORS.get(category, PRIMARY))
         ids.bar.fill = accent
         ids.check_btn.bg = accent
         ids.topic_spinner.values = list(self.topic_map)
-        ids.topic_spinner.text = "Select a topic"  # fuerza on_text al elegir el primero
+        ids.topic_spinner.text = "Select a topic"
         if self.topic_map:
             ids.topic_spinner.text = next(iter(self.topic_map))
-        else:
-            ids.topic_spinner.text = "No topics yet"
 
     def reset_display(self):
         ids = self.ids
         ids.prompt.text = "Elige un tema para empezar."
         ids.passage.text = ""
         ids.answer.text = ""
+        ids.ex_image.source = ""
+        ids.ex_image.opacity = 0
+        ids.ex_image.height = 0
         self.clear_feedback()
         ids.progress.text = ""
         ids.bar.value = 0
 
-    # --- flujo de ejercicios
     def load_topic(self, name):
         if name not in self.topic_map:
             return
@@ -1509,18 +1671,25 @@ class AreaScreen(Screen):
         ids = self.ids
         item = self.current
         if item is None:
-            ids.prompt.text = "Este tema aún no tiene ejercicios. Añádelos en Manage topics."
-            ids.passage.text = ""
-            ids.progress.text = ""
-            ids.bar.value = 0
+            ids.prompt.text = "Este tema aún no tiene ejercicios."
             return
         self.first_try = True
-        self.revealed = False
         ids.prompt.text = item["prompt"]
-        # En Listening el texto nunca se muestra: solo se escucha.
         ids.passage.text = "" if self.category == "Listening" else item["passage"]
         ids.answer.text = ""
         self.clear_feedback()
+
+        img_name = item["image_file"] if "image_file" in item.keys() else ""
+        img_path = resolve_image_path(img_name)
+        if img_path:
+            ids.ex_image.source = img_path
+            ids.ex_image.opacity = 1
+            ids.ex_image.height = dp(170)
+        else:
+            ids.ex_image.source = ""
+            ids.ex_image.opacity = 0
+            ids.ex_image.height = 0
+
         total = len(self.exercises)
         ids.progress.text = "Ejercicio %d de %d  •  Aciertos: %d" % (
             self.index + 1, total, self.correct_count)
@@ -1546,17 +1715,15 @@ class AreaScreen(Screen):
         if ok:
             self.set_feedback("¡Muy bien! Respuesta correcta.", OK_COLOR)
         else:
-            self.set_feedback("Sigue practicando. Inténtalo de nuevo o pulsa 'Show answer'.",
-                              BAD_COLOR)
+            self.set_feedback("Inténtalo de nuevo o pulsa 'Show answer'.", BAD_COLOR)
 
     def show_answer(self):
         item = self.current
         if item is None:
             return
-        if self.first_try:  # ver la respuesta sin intentarlo cuenta como fallo
+        if self.first_try:
             App.get_running_app().db.record_attempt(item["id"], False)
             self.first_try = False
-        self.revealed = True
         options = alternatives(item["answer"])
         self.set_feedback("Respuesta esperada: " + " / ".join(options), INFO_COLOR)
 
@@ -1565,14 +1732,10 @@ class AreaScreen(Screen):
             return
         self.stop_audio()
         if self.index + 1 >= len(self.exercises):
-            total = len(self.exercises)
-            self.set_feedback("¡Tema completado! Aciertos: %d de %d. Volvemos al inicio del tema."
-                              % (self.correct_count, total), OK_COLOR)
+            self.set_feedback("¡Tema completado! Aciertos: %d de %d." % (
+                self.correct_count, len(self.exercises)), OK_COLOR)
             self.index = 0
             self.correct_count = 0
-            self.ids.answer.text = ""
-            self.first_try = True
-            self.ids.progress.text = "Tema completado"
             return
         self.index += 1
         self.show_exercise()
@@ -1588,7 +1751,6 @@ class AreaScreen(Screen):
         fb.text = ""
         fb.bg = (0, 0, 0, 0)
 
-    # --- audio
     def stop_audio(self):
         App.get_running_app().speaker.stop()
         if self.sound:
@@ -1599,12 +1761,10 @@ class AreaScreen(Screen):
             self.sound = None
 
     def play_audio(self, slow=False):
-        """Lee el texto del ejercicio en voz alta (sin mostrarlo en Listening)."""
         item = self.current
         if item is None:
             return
         self.stop_audio()
-        # Si alguien dejó un MP3 con ese nombre se usa, pero no es necesario.
         name = item["audio_file"]
         path = os.path.join(AUDIO_DIR, name) if name else ""
         if not slow and path and os.path.exists(path):
@@ -1617,13 +1777,228 @@ class AreaScreen(Screen):
         if message:
             self.set_feedback(message, BAD_COLOR)
 
-    def go_home(self):
+    def go_back(self):
         self.stop_audio()
         self.manager.transition.direction = "right"
-        self.manager.current = "home"
+        self.manager.current = "practice_hub"
 
     def on_leave(self, *args):
         self.stop_audio()
+
+
+# --------------------------------------------------------------------------
+# Pantalla de Evaluación (Quiz sin ayudas ni pistas)
+# --------------------------------------------------------------------------
+class ExamScreen(Screen):
+    questions = []
+    index = 0
+    results = []
+
+    def start_exam(self):
+        unit = self.ids.unit_spinner.text
+        self.questions = App.get_running_app().db.exam_exercises(
+            unit, limit=EXAM_QUESTION_COUNT)
+        self.index = 0
+        self.results = []
+        ids = self.ids
+        ids.exam_result.text = ""
+        ids.exam_result.bg = (0, 0, 0, 0)
+        if not self.questions:
+            ids.exam_prompt.text = "No hay preguntas disponibles para esta unidad."
+            return
+        ids.exam_answer.disabled = False
+        ids.exam_submit_btn.disabled = False
+        self.show_question()
+
+    def show_question(self):
+        ids = self.ids
+        q = self.questions[self.index]
+        total = len(self.questions)
+        ids.exam_cat.text = "%s  •  %s" % (q["category"].upper(), q["topic_name"])
+        ids.exam_prompt.text = q["prompt"]
+        ids.exam_passage.text = q["passage"] if q["category"] == "Reading" else ""
+
+        img_path = resolve_image_path(q.get("image_file", ""))
+        if img_path:
+            ids.exam_image.source = img_path
+            ids.exam_image.opacity = 1
+            ids.exam_image.height = dp(160)
+        else:
+            ids.exam_image.source = ""
+            ids.exam_image.opacity = 0
+            ids.exam_image.height = 0
+
+        is_listening = q["category"] == "Listening"
+        ids.exam_audio_btn.disabled = not is_listening
+        ids.exam_audio_btn.opacity = 1 if is_listening else 0
+        ids.exam_audio_btn.height = dp(48) if is_listening else 0
+
+        ids.exam_answer.text = ""
+        ids.exam_progress.text = "Pregunta %d de %d (Sin ayudas)" % (self.index + 1, total)
+        ids.exam_bar.maximum = total
+        Animation(value=self.index + 1, d=0.25, t="out_quad").start(ids.exam_bar)
+        ids.exam_submit_btn.text = "Finalizar Examen" if self.index + 1 == total else "Siguiente pregunta  >"
+
+    def play_exam_audio(self):
+        if not self.questions:
+            return
+        q = self.questions[self.index]
+        lines = spoken_text(q["category"], q["passage"])
+        App.get_running_app().speaker.speak(lines, False)
+
+    def submit_and_next(self):
+        if not self.questions:
+            return
+        App.get_running_app().speaker.stop()
+        q = self.questions[self.index]
+        given = self.ids.exam_answer.text.strip()
+        ok = is_correct(given, q["answer"], q["mode"] or "exact")
+        App.get_running_app().db.record_attempt(q["id"], ok)
+        self.results.append((q, given, ok))
+
+        if self.index + 1 < len(self.questions):
+            self.index += 1
+            self.show_question()
+        else:
+            self.finish_exam()
+
+    def finish_exam(self):
+        ids = self.ids
+        ids.exam_answer.disabled = True
+        ids.exam_submit_btn.disabled = True
+        ids.exam_audio_btn.disabled = True
+        ids.exam_audio_btn.opacity = 0
+        ids.exam_audio_btn.height = 0
+        ids.exam_image.opacity = 0
+        ids.exam_image.height = 0
+
+        good = sum(1 for _, _, ok in self.results if ok)
+        total = len(self.results)
+        pct = int(round(100.0 * good / total)) if total else 0
+
+        lines = ["CALIFICACIÓN FINAL: %d / %d (%d%%)\n" % (good, total, pct)]
+        for i, (q, given, ok) in enumerate(self.results, 1):
+            mark = "OK" if ok else "X"
+            expected = alternatives(q["answer"])[0]
+            if ok:
+                lines.append("%d. [%s] %s -> %s" % (i, mark, q["prompt"], given))
+            else:
+                lines.append("%d. [%s] %s\n     Tu resp: %s | Correcta: %s" % (
+                    i, mark, q["prompt"], given or "(vacío)", expected))
+
+        color = OK_COLOR if pct >= 70 else BAD_COLOR
+        ids.exam_result.text = "\n".join(lines)
+        ids.exam_result.color = color
+        ids.exam_result.bg = (color[0], color[1], color[2], 0.16)
+        ids.exam_prompt.text = "Evaluación completada. Revisa tus resultados abajo."
+        ids.exam_passage.text = ""
+        ids.exam_progress.text = "Examen finalizado"
+
+    def go_home(self):
+        App.get_running_app().speaker.stop()
+        self.manager.transition.direction = "right"
+        self.manager.current = "home"
+
+
+# --------------------------------------------------------------------------
+# Pantalla de Conversación Online con Amigo
+# --------------------------------------------------------------------------
+class ChatScreen(Screen):
+    guide_index = 0
+    chat_client = None
+    chat_recognizer = None
+
+    def _show_status(self, message, color=INFO_COLOR):
+        status = self.ids.mic_status
+        status.text = message
+        status.color = color
+        status.bg = (color[0], color[1], color[2], 0.16)
+
+    def next_topic_guide(self):
+        self.guide_index = (self.guide_index + 1) % len(CONVERSATION_PROMPTS)
+        self.ids.topic_guide.text = "Tema sugerido: " + CONVERSATION_PROMPTS[self.guide_index]
+
+    def send_message(self):
+        text = self.ids.chat_input.text.strip()
+        if not text:
+            self._show_status("Escribe un mensaje antes de enviarlo.", BAD_COLOR)
+            return
+        client = self._get_client()
+        if not client.is_configured() or not client.room_code:
+            self._show_status("Primero únete a una sala.", BAD_COLOR)
+            return
+        client.send_message(text)
+        self.ids.chat_input.text = ""
+
+    def start_voice_input(self):
+        if self.chat_recognizer is None:
+            self.chat_recognizer = VoiceRecognizer()
+        self._show_status("Escuchando...", INFO_COLOR)
+        self.chat_recognizer.listen(
+            lambda text: Clock.schedule_once(
+                lambda *_: self._voice_result(text), 0
+            ),
+            lambda error: Clock.schedule_once(
+                lambda *_: self._show_status(error, BAD_COLOR), 0
+            ),
+        )
+
+    def _voice_result(self, text):
+        self.ids.chat_input.text = text
+        self._show_status("Texto reconocido. Pulsa Enviar.", INFO_COLOR)
+
+    def _get_client(self):
+        db = App.get_running_app().db
+        url = db.get_setting("firebase_db_url", FIREBASE_DB_URL)
+        if self.chat_client is None or self.chat_client.base_url != url.strip().rstrip("/"):
+            self.chat_client = OnlineChatClient(url)
+        return self.chat_client
+
+    def on_pre_enter(self, *args):
+        saved_name = App.get_running_app().db.get_setting("chat_user_name", "")
+        if saved_name:
+            self.ids.my_name.text = saved_name
+        box = self.ids.chat_box
+        if len(box.children) == 0:
+            box.add_widget(ChatBubble(
+                sender="Guía",
+                msg="Escribe tu nombre y un código de sala (ej. JUAN-24) y pulsa Unirse.",
+                bubble_bg=list(SURFACE)))
+
+    def connect_friend(self):
+        code = self.ids.friend_code.text.strip().upper()
+        name = self.ids.my_name.text.strip() or "Estudiante"
+        if not code:
+            self._show_status("Escribe un código de invitación (ej. JUAN-24).", BAD_COLOR)
+            return
+        client = self._get_client()
+        if not client.is_configured():
+            self._show_status("Primero guarda tu URL de Firebase en Manage / PDF.", BAD_COLOR)
+            return
+
+        App.get_running_app().db.set_setting("chat_user_name", name)
+        self._show_status("Conectando a la sala %s..." % code, INFO_COLOR)
+
+        def on_msgs(messages):
+            Clock.schedule_once(lambda *_: self._render_messages(messages, name), 0)
+
+        def on_err(err):
+            Clock.schedule_once(lambda *_: self._show_status(err, BAD_COLOR), 0)
+
+        client.join_room(code, name, on_msgs, on_err)
+
+    def _render_messages(self, messages, my_name):
+        self.ids.mic_status.text = ""
+        self.ids.mic_status.bg = (0, 0, 0, 0)
+        box = self.ids.chat_box
+        box.clear_widgets()
+        for m in messages:
+            sender = m.get("sender", "")
+            is_me = sender.lower() == my_name.lower()
+            box.add_widget(ChatBubble(
+                sender="Tú" if is_me else sender,
+                msg=m.get("message", ""),
+                bubble_bg=[0.20, 0.47, 0.93, 1] if is_me else list(SURFACE)))
 
 
 class StatsScreen(Screen):
@@ -1634,21 +2009,24 @@ class StatsScreen(Screen):
         data = App.get_running_app().db.stats()
         box = self.ids.stats_box
         box.clear_widgets()
-        total_all = sum(t for t, _ in data.values())
-        good_all = sum(g for _, g in data.values())
+        total_all = sum(total for total, _ in data.values())
+        good_all = sum(good for _, good in data.values())
         pct_all = int(round(100.0 * good_all / total_all)) if total_all else 0
         hero = StatHero(pct="%d%%" % pct_all)
-        hero.detail = ("%d de %d respuestas correctas" % (good_all, total_all) if total_all
-                       else "Responde algunos ejercicios para ver tu progreso.")
+        hero.detail = (
+            "%d de %d respuestas correctas" % (good_all, total_all)
+            if total_all else "Responde algunos ejercicios para ver tu progreso."
+        )
         box.add_widget(hero)
-        for cat in CATEGORIES:
-            total, good = data.get(cat, (0, 0))
+        for category in CATEGORIES:
+            total, good = data.get(category, (0, 0))
             pct = int(round(100.0 * good / total)) if total else 0
             box.add_widget(StatRow(
-                title=cat,
+                title=category,
                 detail="%d/%d  •  %d%%" % (good, total, pct),
                 value=pct,
-                fill=list(AREA_COLORS[cat])))
+                fill=list(AREA_COLORS[category]),
+            ))
 
     def confirm_reset(self):
         confirm("Reset progress", "¿Borrar todo tu progreso?", self.do_reset)
@@ -1662,6 +2040,11 @@ class AdminScreen(Screen):
     topic_map = {}
 
     def on_pre_enter(self, *args):
+        app = App.get_running_app()
+        self.ids.firebase_url_input.text = (
+            app.db.get_setting("firebase_db_url", "").strip() or FIREBASE_DB_URL
+        )
+        self.ids.gemini_key.text = app.db.get_setting("gemini_api_key", "")
         self.refresh_topics()
 
     def say(self, text, ok=True):
@@ -1670,13 +2053,76 @@ class AdminScreen(Screen):
         self.ids.status.color = color
         self.ids.status.bg = (color[0], color[1], color[2], 0.16)
 
-    def refresh_topics(self):
+    def go_back(self):
+        self.manager.transition.direction = "right"
+        self.manager.current = "home"
+
+    def refresh_topics(self, *args):
         if "category" not in self.ids:
             return
         rows = App.get_running_app().db.topics(self.ids.category.text)
-        self.topic_map = {r["name"]: r["id"] for r in rows}
+        self.topic_map = {row["name"]: row["id"] for row in rows}
         self.ids.topic_pick.values = list(self.topic_map)
         self.ids.topic_pick.text = next(iter(self.topic_map), "Select a topic")
+
+    def save_firebase_url(self):
+        url = self.ids.firebase_url_input.text.strip() or FIREBASE_DB_URL
+        if not url.startswith("https://"):
+            self.say("La URL de Firebase debe comenzar con https://.", False)
+            return
+        App.get_running_app().db.set_setting("firebase_db_url", url)
+        self.say("URL de Firebase guardada.")
+
+    def pick_and_import_pdf(self):
+        api_key = self.ids.gemini_key.text.strip()
+        if not api_key:
+            self.say("Pega tu API Key de Gemini antes de importar.", False)
+            return
+        try:
+            max_pages = int(self.ids.max_pages_input.text)
+        except ValueError:
+            self.say("Indica un número válido de páginas.", False)
+            return
+        if max_pages < 1:
+            self.say("El máximo de páginas debe ser al menos 1.", False)
+            return
+
+        app = App.get_running_app()
+        app.db.set_setting("gemini_api_key", api_key)
+
+        def on_error(message):
+            Clock.schedule_once(lambda *_: self._import_failed(message), 0)
+
+        def on_picked(pdf_path):
+            self.ids.import_pdf_btn.disabled = True
+            importer = BookImporter(app.db, app.user_images_dir)
+
+            def on_progress(message):
+                Clock.schedule_once(lambda *_: self.say(message), 0)
+
+            def on_done(topics, exercises):
+                Clock.schedule_once(
+                    lambda *_: self._import_finished(topics, exercises), 0
+                )
+
+            importer.import_pdf_async(
+                pdf_path, api_key, max_pages,
+                on_progress=on_progress,
+                on_done=on_done,
+                on_error=on_error,
+            )
+
+        pick_pdf_file(app.user_data_dir, on_picked, on_error)
+
+    def _import_finished(self, topics, exercises):
+        self.ids.import_pdf_btn.disabled = False
+        self.refresh_topics()
+        self.say("Importación terminada: %d temas y %d ejercicios." % (
+            topics, exercises))
+
+    def _import_failed(self, message):
+        self.ids.import_pdf_btn.disabled = False
+        self.say(message, False)
 
     def save_topic(self):
         ids = self.ids
@@ -1708,7 +2154,8 @@ class AdminScreen(Screen):
             self.say("La pregunta y la respuesta son obligatorias.", False)
             return
         App.get_running_app().db.add_exercise(
-            topic_id, prompt, ids.ex_passage.text.strip(), answer, "", ids.ex_mode.text)
+            topic_id, prompt, ids.ex_passage.text.strip(), answer, "",
+            ids.ex_mode.text)
         self.say("Ejercicio guardado correctamente.")
         for field in (ids.ex_prompt, ids.ex_passage, ids.ex_answer):
             field.text = ""
@@ -1718,9 +2165,11 @@ class AdminScreen(Screen):
         if name not in self.topic_map:
             self.say("Elige el tema que quieres eliminar.", False)
             return
-        confirm("Delete topic",
-                "¿Eliminar '%s' y todos sus ejercicios?" % name,
-                lambda: self.delete_topic(name))
+        confirm(
+            "Delete topic",
+            "¿Eliminar '%s' y todos sus ejercicios?" % name,
+            lambda: self.delete_topic(name),
+        )
 
     def delete_topic(self, name):
         App.get_running_app().db.delete_topic(self.topic_map[name])
@@ -1734,20 +2183,23 @@ class AdminScreen(Screen):
 class EnglishQuizApp(App):
     def build(self):
         self.title = "English Quiz"
-        # user_data_dir es escribible en Android/iOS y en escritorio
         os.makedirs(self.user_data_dir, exist_ok=True)
+        self.user_images_dir = os.path.join(self.user_data_dir, "images")
+        os.makedirs(self.user_images_dir, exist_ok=True)
         self.db = Database(os.path.join(self.user_data_dir, DB_NAME))
-        self.speaker = Speaker()  # se crea al inicio para que la voz esté lista al usarla
+        self.speaker = Speaker()
         Builder.load_string(KV)
         sm = ScreenManager(transition=SlideTransition(duration=0.2))
-        sm.add_widget(MainScreen(name="home"))
+        sm.add_widget(HomeScreen(name="home"))
+        sm.add_widget(PracticeHubScreen(name="practice_hub"))
         sm.add_widget(AreaScreen(name="area"))
+        sm.add_widget(ExamScreen(name="exam"))
+        sm.add_widget(ChatScreen(name="chat"))
         sm.add_widget(StatsScreen(name="stats"))
         sm.add_widget(AdminScreen(name="admin"))
         return sm
 
     def on_start(self):
-        # Android: botón/gesto "atrás" vuelve al inicio en lugar de cerrar la app
         Window.bind(on_keyboard=self.on_back)
 
     def on_back(self, window, key, *args):
