@@ -62,6 +62,24 @@ buildozer android debug
 
 El APK de depuración se genera en `bin/`. La configuración Android incluye `INTERNET`, `RECORD_AUDIO` y `READ_EXTERNAL_STORAGE`; Android también usa `pyjnius` para las funciones nativas de voz y el selector/renderizador de PDF.
 
+### Compilar con Google Colab
+
+El proyecto incluye `build_android_colab.ipynb`. Se puede abrir directamente desde Google Colab después de subirlo a GitHub:
+
+1. Abre https://colab.research.google.com/
+2. Selecciona **Archivo → Subir cuaderno**.
+3. Sube `build_android_colab.ipynb`.
+4. En el notebook, ejecuta las celdas en orden.
+5. Descarga el APK desde la última celda o desde el explorador de archivos de Colab.
+
+Google Colab usa una máquina Linux temporal. Si el código tiene cambios locales que aún no están en GitHub, haz primero:
+
+```powershell
+git add .
+git commit -m "Preparar compilacion Android"
+git push
+```
+
 ## Datos y privacidad
 
 - Los ejercicios iniciales y el progreso se guardan localmente en `english_quiz.db`, dentro del directorio de datos de Kivy.
