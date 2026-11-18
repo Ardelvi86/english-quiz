@@ -52,7 +52,7 @@ El cliente actual no implementa autenticación de Firebase. Configura las reglas
 
 ## Crear una versión Android
 
-La configuración del proyecto está en `buildozer.spec` (Android API 29, mínimo API 24, arquitecturas ARM64 y ARMv7). Buildozer debe ejecutarse en Linux o WSL, no desde PowerShell nativo.
+La configuración del proyecto está en `buildozer.spec` (Android API 35, mínimo API 24, arquitecturas ARM64 y ARMv7). Buildozer debe ejecutarse en Linux o WSL, no desde PowerShell nativo.
 
 Con Buildozer instalado en Linux/WSL, desde la raíz del proyecto:
 
