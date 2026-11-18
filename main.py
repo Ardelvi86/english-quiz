@@ -903,7 +903,7 @@ KV = r"""
 # ---------------------------------------------------------------- MODO CONVERSACIÓN EN LÍNEA
 <ChatScreen>:
     Page:
-        padding: [dp(16), dp(16), dp(16), dp(48)]
+        padding: [dp(16), dp(16), dp(16), dp(96)]
         BoxLayout:
             size_hint_y: None
             height: dp(48)
