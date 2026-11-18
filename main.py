@@ -258,12 +258,6 @@ KV = r"""
         Line:
             rounded_rectangle: (self.x, self.y, self.width, self.height, dp(12))
             width: 1.1
-        Color:
-            rgba: C_PRIMARY if self.focus else (0, 0, 0, 0)
-        Rectangle:
-            pos: self.cursor_pos
-            size: self.cursor_width, self.line_height + self.line_spacing
-
 <RBtn>:
     size_hint_y: None
     height: dp(50)
@@ -2022,6 +2016,16 @@ class ChatScreen(Screen):
                 sender="Tú" if is_me else sender,
                 msg=m.get("message", ""),
                 bubble_bg=[0.20, 0.47, 0.93, 1] if is_me else list(SURFACE)))
+
+    def go_home(self):
+        if self.chat_client is not None:
+            self.chat_client.leave_room()
+        self.manager.transition.direction = "right"
+        self.manager.current = "home"
+
+    def on_leave(self, *args):
+        if self.chat_client is not None:
+            self.chat_client.leave_room()
 
 
 class StatsScreen(Screen):
