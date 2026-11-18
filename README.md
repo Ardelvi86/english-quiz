@@ -1,32 +1,38 @@
-# English Quiz – Android (versión inicial)
+# English Quiz – Android (Top Notch Fundamentals • Nivel A1)
 
-Aplicación de práctica de inglés con Python, Kivy y SQLite.
+Aplicación móvil de aprendizaje y práctica de inglés desarrollada con **Python**, **Kivy** y **SQLite**, con soporte de voz nativa en Android, importación automática de libros PDF con Inteligencia Artificial y chat en tiempo real mediante **Firebase Realtime Database**.
+
+---
 
 ## Funciones incluidas
-- Secciones Reading, Listening, Speaking, Writing y Conversations.
-- Temas iniciales de nivel A1.
-- Ejercicios con respuesta escrita y retroalimentación básica.
-- Base de datos SQLite local.
-- Pantalla para agregar nuevos temas por categoría.
-- Botón de reproducción para ejercicios de Listening.
+- **Práctica Guiada por Áreas:** Secciones de *Reading*, *Listening*, *Speaking*, *Writing* y *Conversations* con soporte de imágenes y ejemplos.
+- **Contenido Nivel A1 precargado:** Lecciones y ejercicios estructurados de las **Unidades 1 a 7** (*Top Notch Fundamentals*) listos para usar sin conexión.
+- **Evaluación (Quiz) sin pistas:** Exámenes de 10 preguntas aleatorias por unidad o mixtos, con calificación final y desglose de aciertos y errores.
+- **Audio y Voz Nativa:** Síntesis de voz (*Text-to-Speech* en velocidad normal y lenta) para *Listening* y *Speaking* (con soporte opcional para archivos MP3 locales en `assets/audio/`).
+- **Conversación Online en Tiempo Real:** Salas privadas por código de invitación (ej. `JUAN-24`) conectadas a Firebase Realtime Database, con guías de diálogo del libro y dictado por micrófono nativo de Android (*SpeechRecognizer*).
+- **Importador Automático de PDF con IA:** Selección de libros PDF desde el dispositivo para extraer lecciones, recortar ilustraciones (`Pillow`) y generar ejercicios automáticamente mediante la API de **Gemini**, además de gestión manual de temas y ejercicios.
+- **Estadísticas y Progreso Local:** Almacenamiento persistente en **SQLite** con métricas de rendimiento por área.
 
-## Probar en Windows
-1. Instala Python 3.11.
-2. Abre una terminal dentro de esta carpeta.
-3. Ejecuta: `py -3.11 -m venv venv`
-4. Activa el entorno: `venv\\Scripts\\activate`
-5. Instala Kivy: `pip install -r requirements.txt`
-6. Ejecuta: `python main.py`
+---
 
-## Crear APK Android
-La compilación Android con Buildozer se realiza desde Linux. En Windows puedes usar WSL2 con Ubuntu.
-Sigue la instalación oficial: https://buildozer.readthedocs.io/
-Desde Ubuntu, dentro de la carpeta del proyecto, ejecuta: `buildozer android debug`
-El APK se genera en la carpeta `bin/`.
+## Estructura del proyecto
+- `main.py`: Interfaz gráfica (KV), pantallas principales, motor de voz/micrófono nativo y gestión de base de datos SQLite.
+- `book_units.py` / `units_data.py`: Contenido precargado de las Unidades 1 a 7.
+- `pdf_importer.py`: Procesamiento de archivos PDF, recorte de imágenes y generación de ejercicios con Gemini.
+- `online_chat.py`: Cliente REST ligero para sincronización de salas de chat en tiempo real con Firebase.
+- `buildozer.spec`: Configuración de empaquetado y permisos para Android.
 
-## Audios
-Copia archivos MP3 en `assets/audio/`. El ejercicio de ejemplo de Listening busca `bank.mp3`.
+---
 
-## Alcance de esta primera versión
-La navegación, base de datos, ejercicios iniciales y creación de temas están preparados.
-Listening requiere archivos MP3. Speaking permite practicar oralmente, pero la grabación y evaluación automática de pronunciación se incorporarán en una siguiente versión. El panel agrega temas; la administración completa de preguntas y audios también puede ampliarse.
+## Configuración previa (Opcional)
+- **Chat Online (Firebase):** Configura una instancia de *Firebase Realtime Database* con reglas de lectura/escritura en `/rooms/$room_id` y pega tu URL en `FIREBASE_DB_URL` dentro de `main.py` (o ingrésala desde el panel *Manage / PDF* en la app).
+- **Importador PDF (Gemini):** Ingresa tu *Gemini API Key* directamente en la pantalla *Manage / PDF* de la aplicación (se guarda localmente en el dispositivo).
+
+---
+
+## Probar en Windows (PC)
+1. Instala **Python 3.11**.
+2. Abre una terminal (PowerShell) dentro de la carpeta del proyecto.
+3. Crea el entorno virtual:
+   ```powershell
+   py -3.11 -m venv .venv
