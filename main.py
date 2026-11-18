@@ -1365,7 +1365,7 @@ class Speaker:
     def _init_android(self):
         self._status = None
         try:
-            from jnius import autoclass, PythonJavaClass, java_method
+            from jnius import autoclass, PythonJavaClass, java_method  # type: ignore[reportMissingImports]
 
             class InitListener(PythonJavaClass):
                 __javainterfaces__ = ["android/speech/tts/TextToSpeech$OnInitListener"]
@@ -1459,9 +1459,9 @@ class VoiceRecognizer:
             on_error("El micrófono funciona en Android. En PC escribe el mensaje.")
             return
         try:
-            from android.permissions import request_permissions, Permission
-            from jnius import autoclass, PythonJavaClass, java_method
-            from android.runnable import run_on_ui_thread
+            from android.permissions import request_permissions, Permission  # type: ignore[reportMissingImports]
+            from jnius import autoclass, PythonJavaClass, java_method  # type: ignore[reportMissingImports]
+            from android.runnable import run_on_ui_thread  # type: ignore[reportMissingImports]
 
             request_permissions([Permission.RECORD_AUDIO])
 
@@ -1533,8 +1533,8 @@ def pick_pdf_file(temp_dir, on_picked, on_error):
         return
 
     try:
-        from android import activity as android_activity
-        from jnius import autoclass
+        from android import activity as android_activity  # type: ignore[reportMissingImports]
+        from jnius import autoclass  # type: ignore[reportMissingImports]
 
         Intent = autoclass("android.content.Intent")
         PythonActivity = autoclass("org.kivy.android.PythonActivity")

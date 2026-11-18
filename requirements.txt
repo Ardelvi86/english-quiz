@@ -1,3 +1,4 @@
 kivy==2.3.1
 plyer
 Pillow
+PyMuPDF>=1.24,<2

@@ -64,7 +64,7 @@ class BookImporter:
         return self._render_desktop(pdf_path, max_pages)
 
     def _render_android(self, pdf_path, max_pages):
-        from jnius import autoclass
+        from jnius import autoclass  # type: ignore[reportMissingImports]
 
         ParcelFileDescriptor = autoclass("android.os.ParcelFileDescriptor")
         PdfRenderer = autoclass("android.graphics.pdf.PdfRenderer")
@@ -104,8 +104,8 @@ class BookImporter:
 
     def _render_desktop(self, pdf_path, max_pages):
         try:
-            import fitz  # PyMuPDF para pruebas en PC
-            doc = fitz.open(pdf_path)
+            import pymupdf
+            doc = pymupdf.open(pdf_path)
             images = []
             for i in range(min(len(doc), max_pages)):
                 pix = doc[i].get_pixmap(dpi=130)
