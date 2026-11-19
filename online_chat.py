@@ -9,6 +9,8 @@ import time
 import urllib.parse
 import urllib.request
 
+from network_utils import create_ssl_context
+
 
 class OnlineChatClient:
     def __init__(self, firebase_url, token_provider=None):
@@ -76,7 +78,9 @@ class OnlineChatClient:
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(
+                req, timeout=10, context=create_ssl_context()
+            ) as resp:
                 resp.read()
         except Exception as exc:
             if self._on_error:
@@ -88,7 +92,9 @@ class OnlineChatClient:
                 url = self._authenticated_url(
                     f"{self.base_url}/rooms/{self.room_code}.json"
                 )
-                with urllib.request.urlopen(url, timeout=10) as resp:
+                with urllib.request.urlopen(
+                    url, timeout=10, context=create_ssl_context()
+                ) as resp:
                     raw = resp.read().decode("utf-8")
                 if raw != self._last_snapshot:
                     self._last_snapshot = raw

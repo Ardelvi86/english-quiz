@@ -6,6 +6,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from network_utils import create_ssl_context
+
 
 class FirebaseError(Exception):
     """Raised when Firebase rejects a request or cannot be reached."""
@@ -71,7 +73,9 @@ class FirebaseClient:
             url, data=data, headers=headers, method=method
         )
         try:
-            with urllib.request.urlopen(request, timeout=15) as response:
+            with urllib.request.urlopen(
+                request, timeout=15, context=create_ssl_context()
+            ) as response:
                 body = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
@@ -103,7 +107,9 @@ class FirebaseClient:
             url, data=payload, headers=headers, method=method
         )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with urllib.request.urlopen(
+                request, timeout=30, context=create_ssl_context()
+            ) as response:
                 return response.read()
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")

@@ -15,6 +15,8 @@ import uuid
 from kivy.utils import platform
 from PIL import Image
 
+from network_utils import create_ssl_context
+
 PROMPT_EXTRACCION = """
 Analiza estas páginas de un libro de inglés y extrae lecciones estructuradas.
 Devuelve ÚNICAMENTE un JSON válido con esta estructura exacta:
@@ -201,7 +203,9 @@ class BookImporter:
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=90) as resp:
+        with urllib.request.urlopen(
+            req, timeout=90, context=create_ssl_context()
+        ) as resp:
             result = json.loads(resp.read().decode("utf-8"))
         raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
         return json.loads(raw_text)
