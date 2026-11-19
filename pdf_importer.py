@@ -4,11 +4,13 @@ Usa android.graphics.pdf.PdfRenderer en Android (cero dependencias C++ pesadas)
 y Gemini 2.5 Flash para extraer unidades, recortar imágenes y crear ejercicios.
 """
 import base64
+import hashlib
 import io
 import json
 import os
 import threading
 import urllib.request
+import uuid
 
 from kivy.utils import platform
 from PIL import Image
@@ -119,7 +121,10 @@ class BookImporter:
             if on_error:
                 on_error("Pega tu API Key de Gemini antes de importar.")
             return
+        staged_images = []
         try:
+            source_hash = self._hash_pdf(pdf_path)
+            import_id = uuid.uuid4().hex[:12]
             if on_progress:
                 on_progress("Renderizando páginas del PDF...")
             all_images = self._render_pages_pil(pdf_path, max_pages)
@@ -129,8 +134,7 @@ class BookImporter:
                     on_error("El PDF no contiene páginas legibles.")
                 return
 
-            created_topics = 0
-            created_exercises = 0
+            imported_topics = []
             batch_size = 2
 
             for start in range(0, total_pages, batch_size):
@@ -147,15 +151,41 @@ class BookImporter:
                     parts.append({"inline_data": {"mime_type": "image/jpeg", "data": b64}})
 
                 data = self._call_gemini(parts, api_key)
-                t_c, e_c = self._save_to_db(data, batch_imgs, start)
-                created_topics += t_c
-                created_exercises += e_c
+                imported_topics.extend(
+                    self._prepare_topics(
+                        data, batch_imgs, start, source_hash, import_id, staged_images
+                    )
+                )
 
-            if on_done:
-                on_done(created_topics, created_exercises)
+            if not any(topic["exercises"] for topic in imported_topics):
+                raise RuntimeError(
+                    "La IA no generó ejercicios para este PDF; "
+                    "no se modificaron los datos guardados."
+                )
+
+            created_topics, created_exercises = self.db.replace_pdf_import(
+                source_hash, imported_topics
+            )
         except Exception as exc:
+            cleanup_errors = []
+            for filename in staged_images:
+                path = os.path.join(self.images_dir, filename)
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError as cleanup_error:
+                    cleanup_errors.append(str(cleanup_error))
+            cleanup_message = (
+                " No se pudieron limpiar algunas imágenes temporales: "
+                + "; ".join(cleanup_errors)
+                if cleanup_errors else ""
+            )
             if on_error:
-                on_error(f"Error al importar: {exc}")
+                on_error(f"Error al importar: {exc}{cleanup_message}")
+            return
+
+        if on_done:
+            on_done(created_topics, created_exercises)
 
     def _call_gemini(self, parts, api_key):
         url = (
@@ -176,12 +206,20 @@ class BookImporter:
         raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
         return json.loads(raw_text)
 
-    def _save_to_db(self, data, page_images, page_offset):
-        t_created = 0
-        e_created = 0
+    @staticmethod
+    def _hash_pdf(pdf_path):
+        digest = hashlib.sha256()
+        with open(pdf_path, "rb") as pdf_file:
+            for chunk in iter(lambda: pdf_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _prepare_topics(self, data, page_images, page_offset, source_hash, import_id,
+                        staged_images):
+        topics = []
         valid_cats = {"Reading", "Listening", "Speaking", "Writing", "Conversations"}
 
-        for topic in data.get("topics", []):
+        for topic_idx, topic in enumerate(data.get("topics", [])):
             cat = topic.get("category", "Reading")
             if cat not in valid_cats:
                 cat = "Reading"
@@ -189,13 +227,7 @@ class BookImporter:
             if not name:
                 continue
 
-            if not self.db.topic_exists(cat, name):
-                topic_id = self.db.add_topic(cat, name, topic.get("description", ""))
-                t_created += 1
-            else:
-                rows = [r for r in self.db.topics(cat) if r["name"].lower() == name.lower()]
-                topic_id = rows[0]["id"]
-
+            exercises = []
             for idx, ex in enumerate(topic.get("exercises", [])):
                 prompt = (ex.get("prompt") or "").strip()
                 answer = (ex.get("answer") or "").strip()
@@ -207,20 +239,34 @@ class BookImporter:
                 p_idx = ex.get("page_index", 0)
                 if box and len(box) == 4 and 0 <= p_idx < len(page_images):
                     img_filename = self._crop_and_save(
-                        page_images[p_idx], box, f"book_p{page_offset + p_idx}_{idx}.jpg"
+                        page_images[p_idx],
+                        box,
+                        f"book_{source_hash[:12]}_{import_id}_"
+                        f"p{page_offset + p_idx}_t{topic_idx}_e{idx}.jpg",
                     )
+                    if img_filename:
+                        staged_images.append(img_filename)
 
-                self.db.add_exercise(
-                    topic_id=topic_id,
-                    prompt=prompt,
-                    passage=ex.get("passage", ""),
-                    answer=answer,
-                    mode=ex.get("mode", "exact"),
-                    image=img_filename,
+                exercises.append(
+                    {
+                        "prompt": prompt,
+                        "passage": ex.get("passage", ""),
+                        "answer": answer,
+                        "mode": ex.get("mode", "exact"),
+                        "image_file": img_filename,
+                    }
                 )
-                e_created += 1
 
-        return t_created, e_created
+            topics.append(
+                {
+                    "category": cat,
+                    "name": name,
+                    "description": topic.get("description", ""),
+                    "exercises": exercises,
+                }
+            )
+
+        return topics
 
     def _crop_and_save(self, pil_img, box, filename):
         w, h = pil_img.size

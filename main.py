@@ -1194,6 +1194,16 @@ class Database:
         c.execute("""CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT DEFAULT '')""")
+        c.execute("""CREATE TABLE IF NOT EXISTS pdf_imported_exercises (
+            source_hash TEXT NOT NULL,
+            exercise_id INTEGER NOT NULL UNIQUE,
+            PRIMARY KEY(source_hash, exercise_id),
+            FOREIGN KEY(exercise_id) REFERENCES exercises(id) ON DELETE CASCADE)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS pdf_imported_topics (
+            source_hash TEXT NOT NULL,
+            topic_id INTEGER NOT NULL,
+            PRIMARY KEY(source_hash, topic_id),
+            FOREIGN KEY(topic_id) REFERENCES topics(id) ON DELETE CASCADE)""")
         c.commit()
 
     def migrate(self):
@@ -1277,6 +1287,70 @@ class Database:
             "INSERT INTO exercises(topic_id,prompt,passage,answer,audio_file,mode,image_file) "
             "VALUES(?,?,?,?,?,?,?)", (topic_id, prompt, passage, answer, audio, mode, image))
         self.conn.commit()
+
+    def replace_pdf_import(self, source_hash, topics):
+        created_topics = 0
+        created_exercises = 0
+        with self.conn:
+            self.conn.execute(
+                """DELETE FROM exercises
+                WHERE id IN (
+                    SELECT exercise_id FROM pdf_imported_exercises WHERE source_hash=?
+                )""",
+                (source_hash,),
+            )
+            self.conn.execute(
+                """DELETE FROM topics
+                WHERE id IN (
+                    SELECT topic_id FROM pdf_imported_topics WHERE source_hash=?
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM exercises WHERE exercises.topic_id=topics.id
+                )""",
+                (source_hash,),
+            )
+
+            for topic in topics:
+                row = self.conn.execute(
+                    "SELECT id FROM topics WHERE category=? AND lower(name)=lower(?)",
+                    (topic["category"], topic["name"]),
+                ).fetchone()
+                if row:
+                    topic_id = row["id"]
+                else:
+                    cursor = self.conn.execute(
+                        "INSERT INTO topics(category,name,description) VALUES(?,?,?)",
+                        (topic["category"], topic["name"], topic["description"]),
+                    )
+                    topic_id = cursor.lastrowid
+                    self.conn.execute(
+                        "INSERT INTO pdf_imported_topics(source_hash,topic_id) VALUES(?,?)",
+                        (source_hash, topic_id),
+                    )
+                    created_topics += 1
+
+                for exercise in topic["exercises"]:
+                    cursor = self.conn.execute(
+                        """INSERT INTO exercises(
+                            topic_id,prompt,passage,answer,audio_file,mode,image_file
+                        ) VALUES(?,?,?,?,?,?,?)""",
+                        (
+                            topic_id,
+                            exercise["prompt"],
+                            exercise["passage"],
+                            exercise["answer"],
+                            "",
+                            exercise["mode"],
+                            exercise["image_file"],
+                        ),
+                    )
+                    self.conn.execute(
+                        "INSERT INTO pdf_imported_exercises(source_hash,exercise_id) VALUES(?,?)",
+                        (source_hash, cursor.lastrowid),
+                    )
+                    created_exercises += 1
+
+        return created_topics, created_exercises
 
     def delete_topic(self, topic_id):
         self.conn.execute("DELETE FROM topics WHERE id=?", (topic_id,))

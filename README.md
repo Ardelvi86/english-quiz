@@ -44,6 +44,8 @@ py -3.12 -m venv .venv
 
 La app guarda la clave localmente en SQLite cuando se inicia la importación y la vuelve a cargar después. **No agregues la clave al código, al README ni a Git.** Si una clave se expone, revócala y genera otra. En Android el PDF se procesa con `PdfRenderer`; en Windows se usa PyMuPDF.
 
+Si vuelves a importar exactamente el mismo archivo PDF, se reemplazan sus ejercicios importados anteriores. El contenido precargado, los ejercicios agregados manualmente y los de otros PDF se conservan. Si el procesamiento falla o no genera ejercicios, la importación anterior no se modifica.
+
 ## Chat con Firebase
 
 La URL predeterminada está en `FIREBASE_DB_URL` en `main.py`; también se puede cambiar desde **Manage & Importar PDF**. El cliente usa Firebase Realtime Database por REST, en la ruta `/rooms/<código-de-sala>.json`.
