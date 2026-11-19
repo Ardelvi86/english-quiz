@@ -6,12 +6,14 @@ código de sala (ej. JUAN-24) y practiquen inglés por texto o voz.
 import json
 import threading
 import time
+import urllib.parse
 import urllib.request
 
 
 class OnlineChatClient:
-    def __init__(self, firebase_url):
+    def __init__(self, firebase_url, token_provider=None):
         self.base_url = (firebase_url or "").strip().rstrip("/")
+        self.token_provider = token_provider
         self.room_code = ""
         self.user_name = "Estudiante"
         self._running = False
@@ -22,6 +24,15 @@ class OnlineChatClient:
 
     def is_configured(self):
         return self.base_url.startswith("https://")
+
+    def _authenticated_url(self, url):
+        if self.token_provider is None:
+            return url
+        token = self.token_provider()
+        separator = "&" if "?" in url else "?"
+        return "%s%sauth=%s" % (
+            url, separator, urllib.parse.quote(token, safe="")
+        )
 
     def join_room(self, room_code, user_name, on_messages, on_error=None):
         self.leave_room()
@@ -55,8 +66,10 @@ class OnlineChatClient:
         threading.Thread(target=self._post, args=(payload,), daemon=True).start()
 
     def _post(self, payload):
-        url = f"{self.base_url}/rooms/{self.room_code}.json"
         try:
+            url = self._authenticated_url(
+                f"{self.base_url}/rooms/{self.room_code}.json"
+            )
             req = urllib.request.Request(
                 url,
                 data=json.dumps(payload).encode("utf-8"),
@@ -70,9 +83,11 @@ class OnlineChatClient:
                 self._on_error(f"Error de red al enviar: {exc}")
 
     def _poll_loop(self):
-        url = f"{self.base_url}/rooms/{self.room_code}.json"
         while self._running:
             try:
+                url = self._authenticated_url(
+                    f"{self.base_url}/rooms/{self.room_code}.json"
+                )
                 with urllib.request.urlopen(url, timeout=10) as resp:
                     raw = resp.read().decode("utf-8")
                 if raw != self._last_snapshot:

@@ -1,0 +1,39 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "roles": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": false
+      }
+    },
+    "progress": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid",
+        "events": {
+          "$eventId": {
+            ".validate": "newData.hasChildren(['category', 'correct', 'created_at', 'exercise_key']) && newData.child('category').isString() && newData.child('correct').isBoolean() && newData.child('created_at').isNumber() && newData.child('exercise_key').isString()"
+          }
+        }
+      }
+    },
+    "shared_content": {
+      "snapshot": {
+        ".read": "auth != null",
+        ".write": "auth != null && (auth.token.admin === true || root.child('roles').child(auth.uid).val() === 'admin')",
+        ".validate": "newData.child('version').val() === 1"
+      }
+    },
+    "rooms": {
+      "$room": {
+        ".read": "auth != null",
+        ".write": "auth != null",
+        "$messageId": {
+          ".validate": "newData.hasChildren(['sender', 'message', 'ts']) && newData.child('sender').isString() && newData.child('message').isString() && newData.child('ts').isNumber()"
+        }
+      }
+    }
+  }
+}
