@@ -74,6 +74,7 @@ class BookImporter:
         PdfRenderer = autoclass("android.graphics.pdf.PdfRenderer")
         Bitmap = autoclass("android.graphics.Bitmap")
         BitmapConfig = autoclass("android.graphics.Bitmap$Config")
+        Canvas = autoclass("android.graphics.Canvas")
         CompressFormat = autoclass("android.graphics.Bitmap$CompressFormat")
         ByteArrayOutputStream = autoclass("java.io.ByteArrayOutputStream")
         File = autoclass("java.io.File")
@@ -90,8 +91,8 @@ class BookImporter:
             w = int(page.getWidth() * 1.5)
             h = int(page.getHeight() * 1.5)
             bmp = Bitmap.createBitmap(w, h, BitmapConfig.ARGB_8888)
-            # Fondo blanco (los PDFs suelen tener fondo transparente)
-            bmp.eraseColor(-1)
+            # Evita la sobrecarga eraseColor(long) en PyJNIus.
+            Canvas(bmp).drawRGB(255, 255, 255)
             page.render(bmp, None, None, 1)  # 1 = RENDER_MODE_FOR_DISPLAY
             page.close()
 
