@@ -9,6 +9,8 @@ import io
 import json
 import os
 import threading
+import time
+import urllib.error
 import urllib.request
 import uuid
 
@@ -219,10 +221,22 @@ class BookImporter:
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(
-            req, timeout=90, context=create_ssl_context()
-        ) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(
+                    req, timeout=90, context=create_ssl_context()
+                ) as resp:
+                    result = json.loads(resp.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code != 503:
+                    raise
+                if attempt == 2:
+                    raise RuntimeError(
+                        "Gemini no está disponible temporalmente (HTTP 503). "
+                        "Espera unos minutos y vuelve a intentar."
+                    ) from exc
+                time.sleep(2 ** (attempt + 1))
         raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
         return json.loads(raw_text)
 
