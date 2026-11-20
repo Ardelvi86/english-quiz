@@ -573,53 +573,62 @@ KV = r"""
                     bg: C_PRIMARY
                     on_release: root.login()
                 RBtn:
-                    text: 'Crear cuenta de usuario'
+                    text: 'Registrarse'
                     bg: C_SURFACE2
                     on_release: root.open_registration()
 
 <RegisterScreen>:
     Page:
-        BoxLayout:
-            orientation: 'vertical'
-            size_hint_y: None
-            height: self.minimum_height
-            spacing: dp(14)
-            padding: [0, dp(24), 0, dp(20)]
-            RBtn:
-                text: '<'
+        AnchorLayout:
+            anchor_y: 'top'
+            BoxLayout:
+                orientation: 'vertical'
                 size_hint_y: None
-                height: dp(48)
-                bg: C_SURFACE2
-                on_release: root.go_login()
-            Label:
-                text: 'Registro de usuario'
-                size_hint_y: None
-                height: dp(42)
-                font_size: '26sp'
-                bold: True
-                color: C_TEXT
-            Field:
-                id: email
-                hint_text: 'Correo electrónico'
-                multiline: False
-            Field:
-                id: password
-                hint_text: 'Contraseña (mínimo 6 caracteres)'
-                password: True
-                multiline: False
-            Field:
-                id: confirm_password
-                hint_text: 'Repite la contraseña'
-                password: True
-                multiline: False
-            Banner:
-                id: status
-                text: ''
-            RBtn:
-                id: register_button
-                text: 'Crear cuenta'
-                bg: C_PRIMARY
-                on_release: root.register()
+                height: self.minimum_height
+                spacing: dp(14)
+                padding: [0, 0, 0, dp(20)]
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(48)
+                    spacing: dp(12)
+                    RBtn:
+                        text: '<'
+                        size_hint_x: None
+                        width: dp(48)
+                        height: dp(48)
+                        font_size: '20sp'
+                        bg: C_SURFACE2
+                        on_release: root.go_login()
+                    Label:
+                        text: 'Registro de usuario'
+                        font_size: '22sp'
+                        bold: True
+                        color: C_TEXT
+                        text_size: self.size
+                        halign: 'left'
+                        valign: 'middle'
+                Field:
+                    id: email
+                    hint_text: 'Correo electrónico'
+                    multiline: False
+                Field:
+                    id: password
+                    hint_text: 'Contraseña (mínimo 6 caracteres)'
+                    password: True
+                    multiline: False
+                Field:
+                    id: confirm_password
+                    hint_text: 'Repite la contraseña'
+                    password: True
+                    multiline: False
+                Banner:
+                    id: status
+                    text: ''
+                RBtn:
+                    id: register_button
+                    text: 'Crear cuenta'
+                    bg: C_PRIMARY
+                    on_release: root.register()
 
 # ---------------------------------------------------------------- PANEL PRINCIPAL
 <HomeScreen>:
@@ -1144,6 +1153,7 @@ KV = r"""
 # ---------------------------------------------------------------- PROGRESO
 <StatsScreen>:
     Page:
+        padding: [dp(16), dp(16), dp(16), dp(96)]
         BoxLayout:
             size_hint_y: None
             height: dp(48)
@@ -2227,7 +2237,7 @@ class LoginScreen(Screen):
             self.ids.status.color = BAD_COLOR
             return
         self.ids.login_button.disabled = True
-        self.ids.status.text = "Conectando con Firebase..."
+        self.ids.status.text = "Cargando..."
         self.ids.status.color = INFO_COLOR
         App.get_running_app().authenticate(
             email, password, register=False, screen_name="login"
