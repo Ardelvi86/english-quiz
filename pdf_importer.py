@@ -1,7 +1,7 @@
 """Importador automático de libros PDF con IA para English Quiz.
 
 Usa android.graphics.pdf.PdfRenderer en Android (cero dependencias C++ pesadas)
-y Gemini 2.5 Flash para extraer unidades, recortar imágenes y crear ejercicios.
+y Gemini 3.5 Flash-Lite para extraer unidades, recortar imágenes y crear ejercicios.
 """
 import base64
 import hashlib
@@ -193,7 +193,7 @@ class BookImporter:
     def _call_gemini(self, parts, api_key):
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-2.5-flash:generateContent?key={api_key}"
+            f"gemini-3.5-flash-lite:generateContent?key={api_key}"
         )
         payload = {
             "contents": [{"parts": parts}],
