@@ -45,6 +45,11 @@ Reglas:
 - "page_index" es el índice (0, 1, ...) de la imagen enviada en este lote.
 """
 
+PROMPT_EXTRACCION_SOLO_TEXTO = PROMPT_EXTRACCION + (
+    "\n- En modo solo texto, no propongas imágenes y usa siempre "
+    '"image_box": null.\n'
+)
+
 
 class BookImporter:
     def __init__(self, db, images_dir):
@@ -53,10 +58,14 @@ class BookImporter:
         os.makedirs(self.images_dir, exist_ok=True)
 
     def import_pdf_async(self, pdf_path, api_key, max_pages=10,
-                         on_progress=None, on_done=None, on_error=None):
+                         on_progress=None, on_done=None, on_error=None,
+                         include_images=True):
         thread = threading.Thread(
             target=self._run,
-            args=(pdf_path, api_key, max_pages, on_progress, on_done, on_error),
+            args=(
+                pdf_path, api_key, max_pages, on_progress, on_done, on_error,
+                include_images,
+            ),
             daemon=True,
         )
         thread.start()
@@ -119,7 +128,8 @@ class BookImporter:
         except ImportError:
             raise RuntimeError("En PC instala pymupdf (`pip install pymupdf`) para probar PDFs.")
 
-    def _run(self, pdf_path, api_key, max_pages, on_progress, on_done, on_error):
+    def _run(self, pdf_path, api_key, max_pages, on_progress, on_done, on_error,
+             include_images=True):
         if not api_key:
             if on_error:
                 on_error("Pega tu API Key de Gemini antes de importar.")
@@ -146,7 +156,11 @@ class BookImporter:
                     on_progress(f"IA analizando páginas {start + 1} a {end} de {total_pages}...")
 
                 batch_imgs = all_images[start:end]
-                parts = [{"text": PROMPT_EXTRACCION}]
+                prompt = (
+                    PROMPT_EXTRACCION
+                    if include_images else PROMPT_EXTRACCION_SOLO_TEXTO
+                )
+                parts = [{"text": prompt}]
                 for pil_img in batch_imgs:
                     buf = io.BytesIO()
                     pil_img.save(buf, format="JPEG", quality=80)
@@ -156,7 +170,8 @@ class BookImporter:
                 data = self._call_gemini(parts, api_key)
                 imported_topics.extend(
                     self._prepare_topics(
-                        data, batch_imgs, start, source_hash, import_id, staged_images
+                        data, batch_imgs, start, source_hash, import_id,
+                        staged_images, include_images=include_images,
                     )
                 )
 
@@ -220,7 +235,7 @@ class BookImporter:
         return digest.hexdigest()
 
     def _prepare_topics(self, data, page_images, page_offset, source_hash, import_id,
-                        staged_images):
+                        staged_images, include_images=True):
         topics = []
         valid_cats = {"Reading", "Listening", "Speaking", "Writing", "Conversations"}
 
@@ -242,7 +257,8 @@ class BookImporter:
                 img_filename = ""
                 box = ex.get("image_box")
                 p_idx = ex.get("page_index", 0)
-                if box and len(box) == 4 and 0 <= p_idx < len(page_images):
+                if (include_images and box and len(box) == 4
+                        and 0 <= p_idx < len(page_images)):
                     img_filename = self._crop_and_save(
                         page_images[p_idx],
                         box,

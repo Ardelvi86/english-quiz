@@ -25,6 +25,7 @@ from kivy.core.window import Window
 from kivy.uix.popup import Popup
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
+from kivy.uix.checkbox import CheckBox
 from kivy.uix.label import Label
 from kivy.uix.image import Image as KivyImage
 from kivy.uix.screenmanager import ScreenManager, Screen, SlideTransition
@@ -46,7 +47,9 @@ EXAM_QUESTION_COUNT = 25
 # Opcional: pega aquí tu URL de Firebase Realtime Database (ej. "https://mi-app-default-rtdb.firebaseio.com")
 FIREBASE_DB_URL = "https://english-quiz-app-3f3b3-default-rtdb.firebaseio.com/"
 FIREBASE_WEB_API_KEY = "AIzaSyAcBVAeuIQTfqpwxqD9OXqEBLDtTOKTGiw"
-FIREBASE_STORAGE_BUCKET = "english-quiz-app-3f3b3.firebaseapp.com"
+SUPABASE_PROJECT_URL = "https://oyzycijzbswweftsiwbs.supabase.co"
+SUPABASE_PUBLISHABLE_KEY = "sb_publishable_FxetqrRwXoTMJPOQQRJ3rQ_R6XfyASp"
+SUPABASE_STORAGE_BUCKET = "exercise-images"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 AUDIO_DIR = os.path.join(BASE_DIR, "assets", "audio")
@@ -158,9 +161,14 @@ class ChatBubble(BoxLayout):
 # Carga de módulos del proyecto
 # --------------------------------------------------------------------------
 from book_units import BOOK_UNITS  # noqa: E402
-from firebase_client import FirebaseClient, FirebaseError  # noqa: E402
+from firebase_client import (  # noqa: E402
+    FirebaseClient,
+    FirebaseError,
+    text_only_shared_content,
+)
 from pdf_importer import BookImporter  # noqa: E402
 from online_chat import OnlineChatClient  # noqa: E402
+from supabase_storage import SupabaseStorageClient  # noqa: E402
 
 SEED = {cat: [] for cat in CATEGORIES}
 for _cat, _topics in BOOK_UNITS.items():
@@ -1231,22 +1239,33 @@ KV = r"""
                 padding: [0, dp(4), 0, dp(24)]
                 Card:
                     Section:
-                        text: 'FIREBASE REALTIME DATABASE Y STORAGE'
+                        text: 'FIREBASE Y SUPABASE STORAGE'
                     Field:
                         id: firebase_url_input
                         hint_text: 'https://tu-proyecto-default-rtdb.firebaseio.com'
+                        multiline: False
                     Field:
-                        id: firebase_storage_bucket_input
-                        hint_text: 'Bucket, por ejemplo tu-proyecto.firebasestorage.app'
+                        id: supabase_url_input
+                        hint_text: 'URL de Supabase (https://<project-ref>.supabase.co)'
+                        multiline: False
+                    Field:
+                        id: supabase_key_input
+                        hint_text: 'Clave publishable de Supabase (no secret/service_role)'
+                        password: True
+                        multiline: False
+                    Field:
+                        id: supabase_bucket_input
+                        hint_text: 'Bucket público para imágenes (ej. exercise-images)'
+                        multiline: False
                     RBtn:
-                        text: 'Guardar configuración Firebase'
+                        text: 'Guardar configuración'
                         bg: C_SURFACE2
-                        on_release: root.save_firebase_url()
+                        on_release: root.save_service_config()
                 Card:
                     Section:
                         text: 'IMPORTAR LIBRO PDF AUTOMÁTICAMENTE (IA)'
                     WrapLabel:
-                        text: 'Sube un PDF desde tu celular: la IA extraerá las lecciones, recortará las imágenes y creará los ejercicios y exámenes.'
+                        text: 'La IA extrae lecciones y crea ejercicios. Si no activas Solo texto, también recorta y comparte imágenes mediante Supabase Storage.'
                         color: C_MUTED
                         font_size: '13sp'
                     Field:
@@ -1258,6 +1277,27 @@ KV = r"""
                         hint_text: 'Máximo de páginas a procesar (ej. 10)'
                         text: '10'
                         input_filter: 'int'
+                    BoxLayout:
+                        size_hint_y: None
+                        height: dp(40)
+                        spacing: dp(8)
+                        CheckBox:
+                            id: text_only_import
+                            size_hint_x: None
+                            width: dp(40)
+                            active: False
+                            color: C_TEXT
+                        Label:
+                            text: 'Solo texto (sin imágenes)'
+                            color: C_TEXT
+                            font_size: '14sp'
+                            halign: 'left'
+                            valign: 'middle'
+                            text_size: self.size
+                    WrapLabel:
+                        text: 'El PDF sigue procesándose con Gemini, pero la biblioteca compartida se publica sin imágenes. No borra las imágenes guardadas en Supabase.'
+                        color: C_MUTED
+                        font_size: '13sp'
                     RBtn:
                         id: import_pdf_btn
                         text: 'Seleccionar libro PDF e Importar'
@@ -2866,10 +2906,18 @@ class AdminScreen(Screen):
         self.ids.firebase_url_input.text = (
             app.db.get_setting("firebase_db_url", "").strip() or FIREBASE_DB_URL
         )
-        self.ids.firebase_storage_bucket_input.text = (
-            app.db.get_setting("firebase_storage_bucket", "").strip()
-            or FIREBASE_STORAGE_BUCKET
+        self.ids.supabase_url_input.text = (
+            app.db.get_setting("supabase_url", "").strip()
+            or SUPABASE_PROJECT_URL
         )
+        self.ids.supabase_key_input.text = app.db.get_setting(
+            "supabase_publishable_key", ""
+        ).strip() or SUPABASE_PUBLISHABLE_KEY
+        self.ids.supabase_bucket_input.text = (
+            app.db.get_setting("supabase_storage_bucket", "").strip()
+            or SUPABASE_STORAGE_BUCKET
+        )
+        self.ids.text_only_import.active = False
         self.ids.gemini_key.text = app.db.get_setting("gemini_api_key", "")
         self.refresh_topics()
 
@@ -2920,21 +2968,52 @@ class AdminScreen(Screen):
             field.text = ""
         self.ids.ex_mode.text = "exact"
 
-    def save_firebase_url(self):
+    def save_service_config(self):
         if not App.get_running_app().is_admin:
             return
-        url = self.ids.firebase_url_input.text.strip() or FIREBASE_DB_URL
-        if not url.startswith("https://"):
+        firebase_url = self.ids.firebase_url_input.text.strip() or FIREBASE_DB_URL
+        if not firebase_url.startswith("https://"):
             self.say("La URL de Firebase debe comenzar con https://.", False)
             return
-        bucket = self.ids.firebase_storage_bucket_input.text.strip()
-        if "/" in bucket or any(character.isspace() for character in bucket):
-            self.say("El bucket de Storage no debe contener espacios ni barras.", False)
+        supabase_url = (
+            self.ids.supabase_url_input.text.strip() or SUPABASE_PROJECT_URL
+        ).rstrip("/")
+        supabase_key = (
+            self.ids.supabase_key_input.text.strip() or SUPABASE_PUBLISHABLE_KEY
+        )
+        supabase_bucket = (
+            self.ids.supabase_bucket_input.text.strip() or SUPABASE_STORAGE_BUCKET
+        )
+        supabase_values = (supabase_url, supabase_key, supabase_bucket)
+        if any(supabase_values) and not all(supabase_values):
+            self.say(
+                "Completa la URL, clave publishable y bucket de Supabase.",
+                False,
+            )
+            return
+        if (supabase_url
+                and not SupabaseStorageClient.is_valid_project_url(supabase_url)):
+            self.say(
+                "Usa la URL HTTPS del proyecto de Supabase (https://<project-ref>.supabase.co).",
+                False,
+            )
+            return
+        if supabase_key and SupabaseStorageClient.is_secret_key(supabase_key):
+            self.say(
+                "No uses la clave secret/service_role de Supabase en la app.",
+                False,
+            )
+            return
+        if "/" in supabase_bucket or any(
+                character.isspace() for character in supabase_bucket):
+            self.say("El nombre del bucket no debe contener barras ni espacios.", False)
             return
         app = App.get_running_app()
-        app.db.set_setting("firebase_db_url", url)
-        app.db.set_setting("firebase_storage_bucket", bucket)
-        app.firebase.database_url = url.rstrip("/")
+        app.db.set_setting("firebase_db_url", firebase_url)
+        app.db.set_setting("supabase_url", supabase_url)
+        app.db.set_setting("supabase_publishable_key", supabase_key)
+        app.db.set_setting("supabase_storage_bucket", supabase_bucket)
+        app.firebase.database_url = firebase_url.rstrip("/")
         self.say("Configuración guardada. Publicando la biblioteca...")
         app._publish_shared_content_async(
             lambda error: self.say(
@@ -2961,6 +3040,7 @@ class AdminScreen(Screen):
 
         app = App.get_running_app()
         app.db.set_setting("gemini_api_key", api_key)
+        text_only = self.ids.text_only_import.active
 
         def on_error(message):
             Clock.schedule_once(lambda *_: self._import_failed(message), 0)
@@ -2974,7 +3054,10 @@ class AdminScreen(Screen):
 
             def on_done(topics, exercises):
                 Clock.schedule_once(
-                    lambda *_: self._import_finished(topics, exercises), 0
+                    lambda *_: self._import_finished(
+                        topics, exercises, text_only=text_only
+                    ),
+                    0,
                 )
 
             importer.import_pdf_async(
@@ -2982,22 +3065,47 @@ class AdminScreen(Screen):
                 on_progress=on_progress,
                 on_done=on_done,
                 on_error=on_error,
+                include_images=not text_only,
             )
 
-        pick_pdf_file(app.user_data_dir, on_picked, on_error)
+        def start_import():
+            pick_pdf_file(app.user_data_dir, on_picked, on_error)
 
-    def _import_finished(self, topics, exercises):
+        if text_only:
+            confirm(
+                "Importar solo texto",
+                "Esto reemplazará la biblioteca compartida con una versión sin "
+                "imágenes para todos los usuarios. No eliminará las imágenes de "
+                "Supabase. ¿Continuar?",
+                start_import,
+            )
+        else:
+            start_import()
+
+    def _import_finished(self, topics, exercises, text_only=False):
         self.ids.import_pdf_btn.disabled = False
         self.refresh_topics()
-        self.say("Importación terminada. Publicando temas y ejercicios...")
+        self.say(
+            "Importación terminada. Publicando la biblioteca solo con texto..."
+            if text_only
+            else "Importación terminada. Publicando temas y ejercicios..."
+        )
         App.get_running_app()._publish_shared_content_async(
             lambda error: self.say(
                 error or (
-                    "Biblioteca compartida actualizada: %d temas y %d ejercicios."
-                    % (topics, exercises)
+                    (
+                        "Biblioteca compartida sin imágenes actualizada: "
+                        "%d temas y %d ejercicios."
+                        % (topics, exercises)
+                    )
+                    if text_only else (
+                        "Biblioteca compartida actualizada: %d temas y %d ejercicios."
+                        % (topics, exercises)
+                    )
                 ),
                 error is None,
-            )
+            ),
+            include_images=not text_only,
         )
 
     def _import_failed(self, message):
@@ -3340,7 +3448,13 @@ class EnglishQuizApp(App):
                 if not isinstance(image_path, str):
                     raise FirebaseError("Firebase devolvió una imagen no válida.")
                 if image_path:
-                    parts = image_path.split("/")
+                    if image_path.startswith("https://"):
+                        _, _, object_name = (
+                            SupabaseStorageClient.parse_public_url(image_path)
+                        )
+                    else:
+                        object_name = image_path
+                    parts = object_name.split("/")
                     filename = parts[-1] if parts else ""
                     if (len(parts) != 3 or parts[0] != "shared-content"
                             or len(parts[1]) == 0 or len(filename) != 68
@@ -3350,7 +3464,8 @@ class EnglishQuizApp(App):
                         raise FirebaseError(
                             "Firebase devolvió una ruta de imagen compartida no válida."
                         )
-                    paths.add(image_path)
+                    if image_path.startswith("https://"):
+                        paths.add(image_path)
         return paths
 
     def _sync_shared_content_async(self):
@@ -3385,10 +3500,6 @@ class EnglishQuizApp(App):
                     return
 
                 local_topics = []
-                bucket = (
-                    self.db.get_setting("firebase_storage_bucket", "").strip()
-                    or FIREBASE_STORAGE_BUCKET
-                )
                 for topic in remote_topics:
                     if not isinstance(topic, dict) or not isinstance(
                             topic.get("exercises"), list):
@@ -3404,14 +3515,11 @@ class EnglishQuizApp(App):
                             )
                         local_exercise = dict(exercise)
                         image_path = local_exercise.get("image_file", "")
-                        if image_path:
-                            self._shared_image_paths({
-                                "version": 1,
-                                "topics": [{
-                                    "exercises": [{"image_file": image_path}]
-                                }],
-                            })
-                            filename = image_path.rsplit("/", 1)[-1]
+                        if image_path.startswith("https://"):
+                            _, _, object_name = (
+                                SupabaseStorageClient.parse_public_url(image_path)
+                            )
+                            filename = object_name.rsplit("/", 1)[-1]
                             image_digest = filename[:-4]
                             local_filename = "shared_%s.jpg" % image_digest
                             image_path_on_device = os.path.join(
@@ -3425,8 +3533,10 @@ class EnglishQuizApp(App):
                                         == image_digest
                                     )
                             if not valid_cached_file:
-                                image_bytes = self.firebase.download_shared_image(
-                                    bucket, image_path, token
+                                image_bytes = (
+                                    SupabaseStorageClient.download_public_image(
+                                        image_path
+                                    )
                                 )
                                 if hashlib.sha256(image_bytes).hexdigest() != image_digest:
                                     raise FirebaseError(
@@ -3437,6 +3547,8 @@ class EnglishQuizApp(App):
                                     image_file.write(image_bytes)
                                 os.replace(temporary_path, image_path_on_device)
                             local_exercise["image_file"] = local_filename
+                        elif image_path:
+                            local_exercise["image_file"] = ""
                         local_topic["exercises"].append(local_exercise)
                     local_topics.append(local_topic)
 
@@ -3453,7 +3565,7 @@ class EnglishQuizApp(App):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _publish_shared_content_async(self, callback=None):
+    def _publish_shared_content_async(self, callback=None, include_images=True):
         if self.current_user is None or not self.is_admin:
             if callback:
                 callback("Solo el administrador puede publicar contenido.")
@@ -3466,65 +3578,91 @@ class EnglishQuizApp(App):
             try:
                 with self._shared_content_lock:
                     token = self.get_id_token()
-                    previous = self.firebase.get_shared_content(token)
-                    previous_paths = self._shared_image_paths(previous)
                     snapshot = self.db.shared_content_snapshot()
                     snapshot["revision"] = uuid.uuid4().hex
-                    bucket = (
-                        self.db.get_setting("firebase_storage_bucket", "").strip()
-                        or FIREBASE_STORAGE_BUCKET
-                    )
-                    new_paths = set()
-                    for topic in snapshot["topics"]:
-                        for exercise in topic["exercises"]:
-                            image_name = exercise["image_file"]
-                            if not image_name:
-                                continue
-                            if os.path.basename(image_name) != image_name:
-                                raise ValueError(
-                                    "La biblioteca contiene un nombre de imagen no válido."
-                                )
-                            image_path = os.path.join(
-                                self.user_images_dir, image_name
-                            )
-                            if not os.path.isfile(image_path):
-                                image_path = os.path.join(BUNDLED_IMAGE_DIR, image_name)
-                            if not os.path.isfile(image_path):
-                                raise ValueError(
-                                    "No se encuentra la imagen del ejercicio: %s"
-                                    % image_name
-                                )
-                            with open(image_path, "rb") as image_file:
-                                image_bytes = image_file.read()
-                            if len(image_bytes) >= 10 * 1024 * 1024:
-                                raise ValueError(
-                                    "La imagen supera el límite de 10 MB de Firebase Storage."
-                                )
-                            digest = hashlib.sha256(image_bytes).hexdigest()
-                            object_name = "shared-content/%s/%s.jpg" % (
-                                user_id, digest
-                            )
-                            self.firebase.upload_shared_image(
-                                bucket, object_name, image_bytes, token
-                            )
-                            exercise["image_file"] = object_name
-                            new_paths.add(object_name)
-                    self.firebase.put_shared_content(snapshot, token)
-                    stale_paths = previous_paths - new_paths
                     cleanup_errors = []
-                    for object_name in stale_paths:
-                        if object_name.split("/")[1] != user_id:
-                            continue
-                        try:
-                            self.firebase.delete_shared_image(
-                                bucket, object_name, token
+                    if include_images:
+                        previous = self.firebase.get_shared_content(token)
+                        previous_paths = self._shared_image_paths(previous)
+                        storage = SupabaseStorageClient(
+                            self.db.get_setting("supabase_url", "").strip()
+                            or SUPABASE_PROJECT_URL,
+                            self.db.get_setting(
+                                "supabase_publishable_key", ""
+                            ).strip() or SUPABASE_PUBLISHABLE_KEY,
+                            self.db.get_setting(
+                                "supabase_storage_bucket", ""
+                            ).strip() or SUPABASE_STORAGE_BUCKET,
+                        )
+                        new_paths = set()
+                        for topic in snapshot["topics"]:
+                            for exercise in topic["exercises"]:
+                                image_name = exercise["image_file"]
+                                if not image_name:
+                                    continue
+                                if os.path.basename(image_name) != image_name:
+                                    raise ValueError(
+                                        "La biblioteca contiene un nombre de imagen no válido."
+                                    )
+                                image_path = os.path.join(
+                                    self.user_images_dir, image_name
+                                )
+                                if not os.path.isfile(image_path):
+                                    image_path = os.path.join(
+                                        BUNDLED_IMAGE_DIR, image_name
+                                    )
+                                if not os.path.isfile(image_path):
+                                    raise ValueError(
+                                        "No se encuentra la imagen del ejercicio: %s"
+                                        % image_name
+                                    )
+                                with open(image_path, "rb") as image_file:
+                                    image_bytes = SupabaseStorageClient.to_jpeg(
+                                        image_file.read()
+                                    )
+                                if len(image_bytes) >= 10 * 1024 * 1024:
+                                    raise ValueError(
+                                        "La imagen supera el límite de 10 MB de Supabase Storage."
+                                    )
+                                if not storage.is_configured:
+                                    raise FirebaseError(
+                                        "Configura Supabase Storage para publicar imágenes."
+                                    )
+                                digest = hashlib.sha256(image_bytes).hexdigest()
+                                object_name = "shared-content/%s/%s.jpg" % (
+                                    user_id, digest
+                                )
+                                public_url = storage.upload_image(
+                                    object_name, image_bytes, token
+                                )
+                                exercise["image_file"] = public_url
+                                new_paths.add(public_url)
+                    else:
+                        snapshot = text_only_shared_content(snapshot)
+                    self.firebase.put_shared_content(snapshot, token)
+                    if include_images:
+                        stale_paths = previous_paths - new_paths
+                        if stale_paths and not storage.is_configured:
+                            cleanup_errors.append(
+                                "Supabase no está configurado; quedaron imágenes antiguas."
                             )
-                        except FirebaseError as exc:
-                            cleanup_errors.append(str(exc))
+                        for public_url in stale_paths:
+                            if (not storage.is_configured
+                                    or not storage.owns_public_url(public_url)):
+                                continue
+                            _, _, object_name = (
+                                SupabaseStorageClient.parse_public_url(public_url)
+                            )
+                            if object_name.split("/")[1] != user_id:
+                                continue
+                            try:
+                                storage.delete_image(object_name, token)
+                            except FirebaseError as exc:
+                                cleanup_errors.append(str(exc))
                 message = (
                     "Biblioteca publicada, pero no se pudieron limpiar algunas "
                     "imágenes antiguas: %s" % "; ".join(cleanup_errors)
-                    if cleanup_errors else None
+                    if include_images and cleanup_errors else None
                 )
             except (FirebaseError, ValueError, OSError, sqlite3.Error) as exc:
                 message = "No se pudo publicar el contenido: %s" % exc

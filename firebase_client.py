@@ -13,6 +13,22 @@ class FirebaseError(Exception):
     """Raised when Firebase rejects a request or cannot be reached."""
 
 
+def text_only_shared_content(snapshot):
+    return {
+        **snapshot,
+        "topics": [
+            {
+                **topic,
+                "exercises": [
+                    {**exercise, "image_file": ""}
+                    for exercise in topic["exercises"]
+                ],
+            }
+            for topic in snapshot["topics"]
+        ],
+    }
+
+
 _AUTH_ERRORS = {
     "EMAIL_EXISTS": "Ese correo ya está registrado.",
     "EMAIL_NOT_FOUND": "No existe una cuenta con ese correo.",
@@ -94,36 +110,6 @@ class FirebaseClient:
             return json.loads(body)
         except ValueError as exc:
             raise FirebaseError("Firebase devolvió una respuesta no válida.") from exc
-
-    @staticmethod
-    def _request_bytes(url, method="GET", payload=None, content_type=None,
-                       id_token=None):
-        headers = {}
-        if content_type:
-            headers["Content-Type"] = content_type
-        if id_token:
-            headers["Authorization"] = "Bearer " + id_token
-        request = urllib.request.Request(
-            url, data=payload, headers=headers, method=method
-        )
-        try:
-            with urllib.request.urlopen(
-                request, timeout=30, context=create_ssl_context()
-            ) as response:
-                return response.read()
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise FirebaseError(
-                FirebaseClient._error_message(
-                    body, "Firebase Storage rechazó la solicitud"
-                )
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise FirebaseError(
-                "No se pudo conectar con Firebase Storage: %s" % exc.reason
-            ) from exc
-        except OSError as exc:
-            raise FirebaseError("Error de red con Firebase Storage: %s" % exc) from exc
 
     def _auth_url(self, action):
         self._require_configured()
@@ -269,46 +255,4 @@ class FirebaseClient:
             self._database_url("shared_content/snapshot", id_token),
             method="PUT",
             payload=snapshot,
-        )
-
-    @staticmethod
-    def _storage_object_url(bucket, object_name):
-        encoded_bucket = urllib.parse.quote((bucket or "").strip(), safe="")
-        encoded_name = urllib.parse.quote(object_name, safe="")
-        return (
-            "https://firebasestorage.googleapis.com/v0/b/%s/o/%s"
-            % (encoded_bucket, encoded_name)
-        )
-
-    def upload_shared_image(self, bucket, object_name, image_bytes, id_token):
-        if not bucket:
-            raise FirebaseError("Configura el bucket de Firebase Storage.")
-        url = (
-            "https://firebasestorage.googleapis.com/v0/b/%s/o?%s"
-            % (
-                urllib.parse.quote(bucket.strip(), safe=""),
-                urllib.parse.urlencode({"uploadType": "media", "name": object_name}),
-            )
-        )
-        self._request_bytes(
-            url, method="POST", payload=image_bytes, content_type="image/jpeg",
-            id_token=id_token,
-        )
-
-    def download_shared_image(self, bucket, object_name, id_token):
-        if not bucket:
-            raise FirebaseError("Configura el bucket de Firebase Storage.")
-        url = self._storage_object_url(bucket, object_name) + "?alt=media"
-        image_bytes = self._request_bytes(url, id_token=id_token)
-        if not image_bytes:
-            raise FirebaseError("Firebase Storage devolvió una imagen vacía.")
-        return image_bytes
-
-    def delete_shared_image(self, bucket, object_name, id_token):
-        if not bucket:
-            raise FirebaseError("Configura el bucket de Firebase Storage.")
-        self._request_bytes(
-            self._storage_object_url(bucket, object_name),
-            method="DELETE",
-            id_token=id_token,
         )
