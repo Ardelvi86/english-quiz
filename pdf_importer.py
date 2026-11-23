@@ -6,6 +6,7 @@ y Gemini 3.5 Flash-Lite para extraer unidades, recortar imágenes y crear ejerci
 import base64
 import hashlib
 import io
+import itertools
 import json
 import os
 import threading
@@ -20,8 +21,10 @@ from PIL import Image
 from network_utils import create_ssl_context
 
 PROMPT_EXTRACCION = """
-Analiza estas páginas de un libro de inglés y extrae lecciones estructuradas.
-Devuelve ÚNICAMENTE un JSON válido con esta estructura exacta:
+Analiza estas páginas de un libro de inglés como material para crear una
+actividad de observación y transcripción. Identifica las unidades y sus temas,
+y crea preguntas que hagan que el estudiante observe la imagen/actividad del
+libro y escriba la respuesta exactamente como aparece allí. Devuelve ÚNICAMENTE JSON válido:
 {
   "topics": [
     {
@@ -35,16 +38,47 @@ Devuelve ÚNICAMENTE un JSON válido con esta estructura exacta:
           "answer": "respuesta1|respuesta2",
           "mode": "exact",
           "page_index": 0,
-          "image_box": [ymin, xmin, ymax, xmax]
+          "image_box": [ymin, xmin, ymax, xmax],
+          "image_reason": "qué elemento visual concreto necesita ver el alumno"
         }
       ]
     }
   ]
 }
-Reglas:
-- Crea ejercicios variados para Reading, Listening, Speaking, Writing y Conversations según el contenido.
-- Si el ejercicio se apoya en una ilustración, diagrama, tarjeta o reloj de la página, incluye "image_box": [ymin, xmin, ymax, xmax] (coordenadas normalizadas 0 a 1000). Si no necesita imagen, pon "image_box": null.
+Reglas obligatorias:
+- Usa el título/número de unidad y el vocabulario, gramática o función comunicativa
+  que se ve en estas páginas. No inventes unidades, temas ni contenido externo.
+- El objetivo para el PDF completo es producir entre 20 y 25 ejercicios en total.
+  Para este lote crea aproximadamente {batch_target} ejercicios, según el contenido
+  disponible. No repitas una pregunta para alcanzar la cantidad.
+- Si el objetivo de este lote es 0, identifica el tema/unidad visible y devuelve
+  "exercises": [] para reservar las preguntas para otros lotes del mismo libro.
+- Prioriza ejercicios e imágenes didácticas del libro: ilustraciones con etiquetas,
+  diálogos, tarjetas, mapas, tablas, escenas, instrucciones y actividades. La pregunta
+  debe indicar con claridad qué parte observar y qué texto/respuesta escribir.
+- Cuando haya texto que el estudiante deba escribir, copia la respuesta del libro
+  literalmente: mismas palabras, orden, ortografía y puntuación. No la traduzcas,
+  corrijas ni parafrasees. Si hay varias respuestas aceptadas que aparecen en el
+  material, sepáralas con | en answer. No inventes una respuesta que no sea legible.
+- Cada ejercicio debe poder resolverse mirando la página o el recorte asociado.
+  Evita preguntas genéricas, duplicadas o sobre detalles menores.
+- Si una página inicia una unidad, conserva su nombre y no mezcles contenidos
+  de unidades diferentes. Si no se puede identificar una unidad, usa el título
+  visible de la lección o una descripción breve y específica.
+- Crea solo ejercicios útiles para practicar el contenido identificado. No
+  rellenes categorías que no están respaldadas por estas páginas.
+- Asocia una imagen siempre que el ejercicio dependa de una actividad o elemento
+  visual de la página. El recorte debe incluir la información necesaria para
+  responder (incluido el texto impreso relevante cuando sea parte de la actividad).
+  No asocies fotos decorativas ni recortes que no permitan contestar.
+- Usa "image_box": null y "image_reason": "" únicamente si la pregunta se basa
+  en texto corrido y no existe una actividad visual relevante en esas páginas.
+- No recortes encabezados, números de página, adornos, fotos decorativas ni la
+  página completa. Las coordenadas deben encerrar solo el elemento necesario,
+  normalizadas de 0 a 1000 como [ymin, xmin, ymax, xmax].
 - "page_index" es el índice (0, 1, ...) de la imagen enviada en este lote.
+- Responde en inglés para los ejercicios de práctica de inglés; los nombres de
+  unidad pueden conservar el idioma del libro.
 """
 
 PROMPT_EXTRACCION_SOLO_TEXTO = PROMPT_EXTRACCION + (
@@ -59,26 +93,27 @@ class BookImporter:
         self.images_dir = images_dir
         os.makedirs(self.images_dir, exist_ok=True)
 
-    def import_pdf_async(self, pdf_path, api_key, max_pages=10,
+    def import_pdf_async(self, pdf_path, api_key,
                          on_progress=None, on_done=None, on_error=None,
                          include_images=True):
         thread = threading.Thread(
             target=self._run,
             args=(
-                pdf_path, api_key, max_pages, on_progress, on_done, on_error,
+                pdf_path, api_key, on_progress, on_done, on_error,
                 include_images,
             ),
             daemon=True,
         )
         thread.start()
 
-    def _render_pages_pil(self, pdf_path, max_pages):
-        """Convierte las primeras `max_pages` del PDF a objetos PIL.Image."""
+    def _iter_page_batches(self, pdf_path, batch_size=2):
+        """Renderiza el libro completo en lotes para no cargarlo entero en RAM."""
         if platform == "android":
-            return self._render_android(pdf_path, max_pages)
-        return self._render_desktop(pdf_path, max_pages)
+            yield from self._iter_android_batches(pdf_path, batch_size)
+        else:
+            yield from self._iter_desktop_batches(pdf_path, batch_size)
 
-    def _render_android(self, pdf_path, max_pages):
+    def _iter_android_batches(self, pdf_path, batch_size):
         from jnius import autoclass  # type: ignore[reportMissingImports]
 
         ParcelFileDescriptor = autoclass("android.os.ParcelFileDescriptor")
@@ -94,43 +129,47 @@ class BookImporter:
         pfd = ParcelFileDescriptor.open(java_file, ParcelFileDescriptor.MODE_READ_ONLY)
         renderer = PdfRenderer(pfd)
 
-        images = []
-        total = min(renderer.getPageCount(), max_pages)
-        for i in range(total):
-            page = renderer.openPage(i)
-            # Escala ~1.5x para buena legibilidad sin saturar RAM
-            w = int(page.getWidth() * 1.5)
-            h = int(page.getHeight() * 1.5)
-            bmp = Bitmap.createBitmap(w, h, BitmapConfig.ARGB_8888)
-            # Evita la sobrecarga eraseColor(long) en PyJNIus.
-            Canvas(bmp).drawRGB(255, 255, 255)
-            page.render(bmp, None, None, 1)  # 1 = RENDER_MODE_FOR_DISPLAY
-            page.close()
+        total = renderer.getPageCount()
+        try:
+            for start in range(0, total, batch_size):
+                images = []
+                for i in range(start, min(start + batch_size, total)):
+                    page = renderer.openPage(i)
+                    # Resolución moderada para legibilidad y uso acotado de RAM.
+                    w = int(page.getWidth() * 1.5)
+                    h = int(page.getHeight() * 1.5)
+                    bmp = Bitmap.createBitmap(w, h, BitmapConfig.ARGB_8888)
+                    Canvas(bmp).drawRGB(255, 255, 255)
+                    page.render(bmp, None, None, 1)
+                    page.close()
+                    stream = ByteArrayOutputStream()
+                    bmp.compress(CompressFormat.JPEG, 85, stream)
+                    raw_bytes = bytes(stream.toByteArray())
+                    bmp.recycle()
+                    images.append(Image.open(io.BytesIO(raw_bytes)))
+                yield total, start, images
+        finally:
+            renderer.close()
+            pfd.close()
 
-            stream = ByteArrayOutputStream()
-            bmp.compress(CompressFormat.JPEG, 85, stream)
-            raw_bytes = bytes(stream.toByteArray())
-            bmp.recycle()
-
-            images.append(Image.open(io.BytesIO(raw_bytes)))
-
-        renderer.close()
-        pfd.close()
-        return images
-
-    def _render_desktop(self, pdf_path, max_pages):
+    def _iter_desktop_batches(self, pdf_path, batch_size):
         try:
             import pymupdf
             doc = pymupdf.open(pdf_path)
-            images = []
-            for i in range(min(len(doc), max_pages)):
-                pix = doc[i].get_pixmap(dpi=130)
-                images.append(Image.open(io.BytesIO(pix.tobytes("jpeg"))))
-            return images
+            total = len(doc)
+            try:
+                for start in range(0, total, batch_size):
+                    images = []
+                    for i in range(start, min(start + batch_size, total)):
+                        pix = doc[i].get_pixmap(dpi=130)
+                        images.append(Image.open(io.BytesIO(pix.tobytes("jpeg"))))
+                    yield total, start, images
+            finally:
+                doc.close()
         except ImportError:
             raise RuntimeError("En PC instala pymupdf (`pip install pymupdf`) para probar PDFs.")
 
-    def _run(self, pdf_path, api_key, max_pages, on_progress, on_done, on_error,
+    def _run(self, pdf_path, api_key, on_progress, on_done, on_error,
              include_images=True):
         if not api_key:
             if on_error:
@@ -141,27 +180,31 @@ class BookImporter:
             source_hash = self._hash_pdf(pdf_path)
             import_id = uuid.uuid4().hex[:12]
             if on_progress:
-                on_progress("Renderizando páginas del PDF...")
-            all_images = self._render_pages_pil(pdf_path, max_pages)
-            total_pages = len(all_images)
-            if total_pages == 0:
+                on_progress("Preparando el libro completo...")
+            imported_topics = []
+            batch_size = 2
+            batch_iterator = iter(self._iter_page_batches(pdf_path, batch_size))
+            first_batch = next(batch_iterator, None)
+            if first_batch is None:
                 if on_error:
                     on_error("El PDF no contiene páginas legibles.")
                 return
-
-            imported_topics = []
-            batch_size = 2
-
-            for start in range(0, total_pages, batch_size):
-                end = min(start + batch_size, total_pages)
+            first_total, _, _ = first_batch
+            total_batches = (first_total + batch_size - 1) // batch_size
+            batches = itertools.chain((first_batch,), batch_iterator)
+            for batch_index, (total_pages, start, batch_imgs) in enumerate(batches):
+                end = min(start + len(batch_imgs), total_pages)
+                batch_target = (
+                    round((batch_index + 1) * 22 / total_batches)
+                    - round(batch_index * 22 / total_batches)
+                )
                 if on_progress:
                     on_progress(f"IA analizando páginas {start + 1} a {end} de {total_pages}...")
 
-                batch_imgs = all_images[start:end]
                 prompt = (
                     PROMPT_EXTRACCION
                     if include_images else PROMPT_EXTRACCION_SOLO_TEXTO
-                )
+                ).replace("{batch_target}", str(batch_target))
                 parts = [{"text": prompt}]
                 for pil_img in batch_imgs:
                     buf = io.BytesIO()
@@ -271,7 +314,13 @@ class BookImporter:
                 img_filename = ""
                 box = ex.get("image_box")
                 p_idx = ex.get("page_index", 0)
-                if (include_images and box and len(box) == 4
+                image_reason = (ex.get("image_reason") or "").strip()
+                if (include_images and image_reason and isinstance(box, list)
+                        and len(box) == 4
+                        and all(isinstance(value, (int, float)) for value in box)
+                        and 0 <= box[0] < box[2] <= 1000
+                        and 0 <= box[1] < box[3] <= 1000
+                        and isinstance(p_idx, int)
                         and 0 <= p_idx < len(page_images)):
                     img_filename = self._crop_and_save(
                         page_images[p_idx],

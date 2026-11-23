@@ -1272,11 +1272,10 @@ KV = r"""
                         id: gemini_key
                         hint_text: 'Pega tu Gemini API Key (se guarda aquí)'
                         password: True
-                    Field:
-                        id: max_pages_input
-                        hint_text: 'Máximo de páginas a procesar (ej. 10)'
-                        text: '10'
-                        input_filter: 'int'
+                    WrapLabel:
+                        text: 'Se analizarán todas las páginas del libro. La IA buscará actividades e imágenes relevantes de sus unidades y generará unas 20–25 preguntas.'
+                        color: C_MUTED
+                        font_size: '13sp'
                     BoxLayout:
                         size_hint_y: None
                         height: dp(40)
@@ -3029,15 +3028,6 @@ class AdminScreen(Screen):
         if not api_key:
             self.say("Pega tu API Key de Gemini antes de importar.", False)
             return
-        try:
-            max_pages = int(self.ids.max_pages_input.text)
-        except ValueError:
-            self.say("Indica un número válido de páginas.", False)
-            return
-        if max_pages < 1:
-            self.say("El máximo de páginas debe ser al menos 1.", False)
-            return
-
         app = App.get_running_app()
         app.db.set_setting("gemini_api_key", api_key)
         text_only = self.ids.text_only_import.active
@@ -3061,7 +3051,7 @@ class AdminScreen(Screen):
                 )
 
             importer.import_pdf_async(
-                pdf_path, api_key, max_pages,
+                pdf_path, api_key,
                 on_progress=on_progress,
                 on_done=on_done,
                 on_error=on_error,
