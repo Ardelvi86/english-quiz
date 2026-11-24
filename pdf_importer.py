@@ -282,13 +282,22 @@ class BookImporter:
                     result = json.loads(resp.read().decode("utf-8"))
                 break
             except urllib.error.HTTPError as exc:
-                if exc.code != 503:
+                if exc.code not in (429, 503):
                     raise
+                if exc.code == 429 and attempt >= 5:
+                    raise RuntimeError(
+                        "Gemini sigue limitando las solicitudes (HTTP 429) "
+                        "después de varios reintentos. Espera unos minutos y "
+                        "vuelve a importar el PDF."
+                    ) from exc
                 retry_after = exc.headers.get("Retry-After")
                 try:
-                    delay = min(60, max(1, int(retry_after))) if retry_after else min(60, 5 * (2 ** min(attempt, 4)))
+                    delay = (
+                        min(300, max(1, int(retry_after)))
+                        if retry_after else min(60, 10 * (2 ** min(attempt, 3)))
+                    )
                 except (TypeError, ValueError):
-                    delay = min(60, 5 * (2 ** min(attempt, 4)))
+                    delay = min(60, 10 * (2 ** min(attempt, 3)))
                 if on_retry:
                     on_retry(delay)
                 time.sleep(delay)
