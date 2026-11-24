@@ -212,7 +212,15 @@ class BookImporter:
                     b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
                     parts.append({"inline_data": {"mime_type": "image/jpeg", "data": b64}})
 
-                data = self._call_gemini(parts, api_key)
+                data = self._call_gemini(
+                    parts, api_key,
+                    on_retry=(
+                        lambda delay: on_progress(
+                            "Gemini está temporalmente saturado. "
+                            f"Reintentando páginas {start + 1}-{end} en {delay} s..."
+                        ) if on_progress else None
+                    ),
+                )
                 imported_topics.extend(
                     self._prepare_topics(
                         data, batch_imgs, start, source_hash, import_id,
@@ -250,7 +258,7 @@ class BookImporter:
         if on_done:
             on_done(created_topics, created_exercises)
 
-    def _call_gemini(self, parts, api_key):
+    def _call_gemini(self, parts, api_key, on_retry=None):
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
             f"gemini-3.5-flash-lite:generateContent?key={api_key}"
@@ -264,7 +272,8 @@ class BookImporter:
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
         )
-        for attempt in range(3):
+        attempt = 0
+        while True:
             try:
                 with urllib.request.urlopen(
                     req, timeout=90, context=create_ssl_context()
@@ -274,12 +283,15 @@ class BookImporter:
             except urllib.error.HTTPError as exc:
                 if exc.code != 503:
                     raise
-                if attempt == 2:
-                    raise RuntimeError(
-                        "Gemini no está disponible temporalmente (HTTP 503). "
-                        "Espera unos minutos y vuelve a intentar."
-                    ) from exc
-                time.sleep(2 ** (attempt + 1))
+                retry_after = exc.headers.get("Retry-After")
+                try:
+                    delay = min(60, max(1, int(retry_after))) if retry_after else min(60, 5 * (2 ** min(attempt, 4)))
+                except (TypeError, ValueError):
+                    delay = min(60, 5 * (2 ** min(attempt, 4)))
+                if on_retry:
+                    on_retry(delay)
+                time.sleep(delay)
+                attempt += 1
         raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
         return json.loads(raw_text)
 
