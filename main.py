@@ -1273,7 +1273,7 @@ KV = r"""
                         hint_text: 'Pega tu Gemini API Key (se guarda aquí)'
                         password: True
                     WrapLabel:
-                        text: 'Se analizarán todas las páginas del libro. La IA buscará actividades e imágenes relevantes de sus unidades y generará unas 20–25 preguntas.'
+                        text: 'Se analizarán hasta 40 páginas por sesión. El avance se guarda automáticamente; selecciona el mismo PDF para continuar desde la última página guardada.'
                         color: C_MUTED
                         font_size: '13sp'
                     BoxLayout:
@@ -1447,6 +1447,13 @@ class Database:
             topic_id INTEGER NOT NULL,
             PRIMARY KEY(source_hash, topic_id),
             FOREIGN KEY(topic_id) REFERENCES topics(id) ON DELETE CASCADE)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS pdf_import_sessions (
+            source_hash TEXT PRIMARY KEY,
+            total_pages INTEGER NOT NULL,
+            next_page INTEGER NOT NULL DEFAULT 0,
+            include_images INTEGER NOT NULL DEFAULT 1,
+            completed INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
         c.commit()
 
     def migrate(self):
@@ -1690,6 +1697,90 @@ class Database:
                         (source_hash, cursor.lastrowid),
                     )
                     created_exercises += 1
+
+        return created_topics, created_exercises
+
+    def get_pdf_import_session(self, source_hash):
+        row = self.conn.execute(
+            "SELECT * FROM pdf_import_sessions WHERE source_hash=?",
+            (source_hash,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def save_pdf_import_batch(self, source_hash, total_pages, next_page,
+                              include_images, topics):
+        """Persist one analyzed batch and its checkpoint in the same transaction."""
+        created_topics = 0
+        created_exercises = 0
+        with self.conn:
+            for topic in topics:
+                row = self.conn.execute(
+                    "SELECT id FROM topics WHERE category=? AND lower(name)=lower(?)",
+                    (topic["category"], topic["name"]),
+                ).fetchone()
+                if row:
+                    topic_id = row["id"]
+                else:
+                    cursor = self.conn.execute(
+                        "INSERT INTO topics(category,name,description,source) "
+                        "VALUES(?,?,?,'pdf')",
+                        (topic["category"], topic["name"], topic["description"]),
+                    )
+                    topic_id = cursor.lastrowid
+                    created_topics += 1
+
+                linked = self.conn.execute(
+                    "SELECT 1 FROM pdf_imported_topics "
+                    "WHERE source_hash=? AND topic_id=?",
+                    (source_hash, topic_id),
+                ).fetchone()
+                if not linked:
+                    self.conn.execute(
+                        "INSERT INTO pdf_imported_topics(source_hash,topic_id) "
+                        "VALUES(?,?)",
+                        (source_hash, topic_id),
+                    )
+
+                for exercise in topic["exercises"]:
+                    cursor = self.conn.execute(
+                        """INSERT INTO exercises(
+                            topic_id,prompt,passage,answer,audio_file,mode,image_file,source
+                        ) VALUES(?,?,?,?,?,?,?,'pdf')""",
+                        (
+                            topic_id,
+                            exercise["prompt"],
+                            exercise["passage"],
+                            exercise["answer"],
+                            "",
+                            exercise["mode"],
+                            exercise["image_file"],
+                        ),
+                    )
+                    self.conn.execute(
+                        "INSERT INTO pdf_imported_exercises(source_hash,exercise_id) "
+                        "VALUES(?,?)",
+                        (source_hash, cursor.lastrowid),
+                    )
+                    created_exercises += 1
+
+            self.conn.execute(
+                """INSERT INTO pdf_import_sessions(
+                    source_hash,total_pages,next_page,include_images,completed,updated_at
+                ) VALUES(?,?,?,?,?,CURRENT_TIMESTAMP)
+                ON CONFLICT(source_hash) DO UPDATE SET
+                    total_pages=excluded.total_pages,
+                    next_page=excluded.next_page,
+                    include_images=excluded.include_images,
+                    completed=excluded.completed,
+                    updated_at=CURRENT_TIMESTAMP""",
+                (
+                    source_hash,
+                    total_pages,
+                    next_page,
+                    int(include_images),
+                    int(next_page >= total_pages),
+                ),
+            )
 
         return created_topics, created_exercises
 
@@ -3042,10 +3133,12 @@ class AdminScreen(Screen):
             def on_progress(message):
                 Clock.schedule_once(lambda *_: self.say(message), 0)
 
-            def on_done(topics, exercises):
+            def on_done(topics, exercises, start_page, end_page,
+                         total_pages, complete):
                 Clock.schedule_once(
                     lambda *_: self._import_finished(
-                        topics, exercises, text_only=text_only
+                        topics, exercises, start_page, end_page,
+                        total_pages, complete, text_only=text_only
                     ),
                     0,
                 )
@@ -3072,26 +3165,27 @@ class AdminScreen(Screen):
         else:
             start_import()
 
-    def _import_finished(self, topics, exercises, text_only=False):
+    def _import_finished(self, topics, exercises, start_page, end_page,
+                         total_pages, complete, text_only=False):
         self.ids.import_pdf_btn.disabled = False
         self.refresh_topics()
         self.say(
-            "Importación terminada. Publicando la biblioteca solo con texto..."
-            if text_only
-            else "Importación terminada. Publicando temas y ejercicios..."
+            "Sesión guardada. Publicando biblioteca sin imágenes..."
+            if text_only else "Sesión guardada. Publicando biblioteca..."
         )
         App.get_running_app()._publish_shared_content_async(
             lambda error: self.say(
                 error or (
-                    (
-                        "Biblioteca compartida sin imágenes actualizada: "
-                        "%d temas y %d ejercicios."
-                        % (topics, exercises)
-                    )
-                    if text_only else (
-                        "Biblioteca compartida actualizada: %d temas y %d ejercicios."
-                        % (topics, exercises)
-                    )
+                    "Libro completo: páginas %d de %d importadas. Biblioteca %s."
+                    % (end_page, total_pages,
+                       "publicada sin imágenes" if text_only else "publicada")
+                    if complete else
+                    "Avance guardado: páginas %d-%d de %d. Se importaron %d "
+                    "ejercicios en esta sesión. Selecciona el mismo PDF para "
+                    "continuar desde la página %d. Biblioteca %s."
+                    % (start_page + 1, end_page, total_pages, exercises,
+                       end_page + 1,
+                       "publicada sin imágenes" if text_only else "publicada")
                 ),
                 error is None,
             ),

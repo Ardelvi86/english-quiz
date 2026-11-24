@@ -107,14 +107,14 @@ class BookImporter:
         )
         thread.start()
 
-    def _iter_page_batches(self, pdf_path, batch_size=2):
-        """Renderiza el libro completo en lotes para no cargarlo entero en RAM."""
+    def _iter_page_batches(self, pdf_path, batch_size=2, start_page=0):
+        """Renderiza páginas por lotes sin cargar el libro entero en RAM."""
         if platform == "android":
-            yield from self._iter_android_batches(pdf_path, batch_size)
+            yield from self._iter_android_batches(pdf_path, batch_size, start_page)
         else:
-            yield from self._iter_desktop_batches(pdf_path, batch_size)
+            yield from self._iter_desktop_batches(pdf_path, batch_size, start_page)
 
-    def _iter_android_batches(self, pdf_path, batch_size):
+    def _iter_android_batches(self, pdf_path, batch_size, start_page=0):
         from jnius import autoclass  # type: ignore[reportMissingImports]
 
         ParcelFileDescriptor = autoclass("android.os.ParcelFileDescriptor")
@@ -132,7 +132,7 @@ class BookImporter:
 
         total = renderer.getPageCount()
         try:
-            for start in range(0, total, batch_size):
+            for start in range(start_page, total, batch_size):
                 images = []
                 for i in range(start, min(start + batch_size, total)):
                     page = renderer.openPage(i)
@@ -153,13 +153,13 @@ class BookImporter:
             renderer.close()
             pfd.close()
 
-    def _iter_desktop_batches(self, pdf_path, batch_size):
+    def _iter_desktop_batches(self, pdf_path, batch_size, start_page=0):
         try:
             import pymupdf
             doc = pymupdf.open(pdf_path)
             total = len(doc)
             try:
-                for start in range(0, total, batch_size):
+                for start in range(start_page, total, batch_size):
                     images = []
                     for i in range(start, min(start + batch_size, total)):
                         pix = doc[i].get_pixmap(dpi=130)
@@ -179,28 +179,54 @@ class BookImporter:
         staged_images = []
         try:
             source_hash = self._hash_pdf(pdf_path)
+            session = self.db.get_pdf_import_session(source_hash)
+            if session and bool(session["include_images"]) != bool(include_images):
+                raise RuntimeError(
+                    "Este libro tiene una importación pendiente con otra opción "
+                    "de imágenes. Continúa con la misma opción que usaste al comenzar."
+                )
+            if session and session["completed"]:
+                total = session["total_pages"]
+                if on_done:
+                    on_done(0, 0, total, total, total, True)
+                return
+
+            start_page = session["next_page"] if session else 0
             import_id = uuid.uuid4().hex[:12]
             if on_progress:
-                on_progress("Preparando el libro completo...")
-            imported_topics = []
+                on_progress("Preparando la importación desde la página %d..." % (start_page + 1))
             batch_size = 2
-            batch_iterator = iter(self._iter_page_batches(pdf_path, batch_size))
+            batch_iterator = iter(self._iter_page_batches(
+                pdf_path, batch_size, start_page
+            ))
             first_batch = next(batch_iterator, None)
             if first_batch is None:
-                if on_error:
+                if session:
+                    total = session["total_pages"]
+                    if on_done:
+                        on_done(0, 0, total, total, total, True)
+                elif on_error:
                     on_error("El PDF no contiene páginas legibles.")
                 return
             first_total, _, _ = first_batch
-            total_batches = (first_total + batch_size - 1) // batch_size
             batches = itertools.chain((first_batch,), batch_iterator)
-            for batch_index, (total_pages, start, batch_imgs) in enumerate(batches):
+            session_end = min(start_page + 40, first_total)
+            session_topics = 0
+            session_exercises = 0
+            end_page = start_page
+            for total_pages, start, batch_imgs in batches:
                 end = min(start + len(batch_imgs), total_pages)
+                if start >= session_end:
+                    break
                 batch_target = (
-                    round((batch_index + 1) * 22 / total_batches)
-                    - round(batch_index * 22 / total_batches)
+                    round(end * 22 / total_pages)
+                    - round(start * 22 / total_pages)
                 )
                 if on_progress:
-                    on_progress(f"IA analizando páginas {start + 1} a {end} de {total_pages}...")
+                    on_progress(
+                        f"Sesión: páginas {start_page + 1}-{session_end} de "
+                        f"{total_pages}. Analizando {start + 1}-{end}..."
+                    )
 
                 prompt = (
                     PROMPT_EXTRACCION
@@ -222,22 +248,34 @@ class BookImporter:
                         ) if on_progress else None
                     ),
                 )
-                imported_topics.extend(
-                    self._prepare_topics(
-                        data, batch_imgs, start, source_hash, import_id,
-                        staged_images, include_images=include_images,
-                    )
+                batch_topics = self._prepare_topics(
+                    data, batch_imgs, start, source_hash, import_id,
+                    staged_images, include_images=include_images,
                 )
-
-            if not any(topic["exercises"] for topic in imported_topics):
-                raise RuntimeError(
-                    "La IA no generó ejercicios para este PDF; "
-                    "no se modificaron los datos guardados."
+                created_topics, created_exercises = self.db.save_pdf_import_batch(
+                    source_hash,
+                    total_pages,
+                    end,
+                    include_images,
+                    batch_topics,
                 )
+                session_topics += created_topics
+                session_exercises += created_exercises
+                end_page = end
+                staged_images.clear()
+                if end_page >= session_end:
+                    break
 
-            created_topics, created_exercises = self.db.replace_pdf_import(
-                source_hash, imported_topics
-            )
+            complete = end_page >= first_total
+            if on_done:
+                on_done(
+                    session_topics,
+                    session_exercises,
+                    start_page,
+                    end_page,
+                    first_total,
+                    complete,
+                )
         except Exception as exc:
             cleanup_errors = []
             for filename in staged_images:
@@ -255,9 +293,6 @@ class BookImporter:
             if on_error:
                 on_error(f"Error al importar: {exc}{cleanup_message}")
             return
-
-        if on_done:
-            on_done(created_topics, created_exercises)
 
     def _call_gemini(self, parts, api_key, on_retry=None):
         url = (

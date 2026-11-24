@@ -10,11 +10,11 @@ Aplicación de aprendizaje de inglés hecha con Python, Kivy y SQLite. Funciona 
 - **Audio y voz:** síntesis de voz para practicar; el reconocimiento por micrófono está disponible en Android. En Windows, el botón de voz informa que se debe escribir el mensaje.
 - **Chat en línea:** salas de conversación por código mediante Firebase Realtime Database.
 - **Cuentas y roles:** registro e inicio de sesión por correo con Firebase Authentication. El registro público siempre crea usuarios normales; el rol de administrador se asigna manualmente en Firebase.
-- **Importación de PDF con Gemini:** selecciona un PDF, elige el máximo de páginas (10 por defecto) y genera temas y ejercicios. También se pueden crear y administrar temas manualmente.
+- **Importación de PDF con Gemini:** procesa libros en sesiones de hasta 40 páginas y guarda el avance por lote para poder continuar. También se pueden crear y administrar temas manualmente.
 - **Vistas por rol:** los usuarios normales practican, hacen quizzes y conversan; no ven Manage/PDF ni botones de borrado. El administrador conserva la pantalla de administración actual.
 - **Biblioteca compartida:** el administrador publica automáticamente en Firebase los ejercicios importados y los temas/ejercicios manuales; las reimportaciones, ediciones y eliminaciones reemplazan el contenido compartido. Los usuarios lo descargan al iniciar sesión y mientras la app está abierta en Inicio.
 - **Imágenes compartidas:** en la publicación normal, las imágenes recortadas de los ejercicios se suben a un bucket público de Supabase Storage. El PDF original no se publica.
-- **Importación solo texto:** debajo del máximo de páginas, el administrador puede marcar **Solo texto (sin imágenes)**. Tras confirmar, toda la biblioteca compartida se publica en Firebase sin imágenes. Esto no borra las imágenes existentes en Supabase.
+- **Importación solo texto:** el administrador puede marcar **Solo texto (sin imágenes)**. Tras confirmar, la biblioteca compartida se publica en Firebase sin imágenes. Esto no borra las imágenes existentes en Supabase.
 - **Progreso por cuenta:** los intentos y estadísticas se sincronizan en Firebase por usuario. El contenido inicial sigue siendo local en cada dispositivo.
 
 ## Archivos principales
@@ -47,13 +47,13 @@ py -3.12 -m venv .venv
 
 1. Crea una API key en [Google AI Studio](https://aistudio.google.com/app/apikey).
 2. En la app, abre **Manage & Importar PDF** y pega la clave en **Gemini API Key**.
-3. Indica el máximo de páginas. Deja **Solo texto (sin imágenes)** desmarcado para publicar imágenes con Supabase, o márcalo para publicar toda la biblioteca sin imágenes en Firebase.
-4. Pulsa **Seleccionar libro PDF e Importar** y, si activaste solo texto, confirma la publicación sin imágenes.
+3. La importación procesa hasta 40 páginas por sesión y guarda el avance después de cada lote. Deja **Solo texto (sin imágenes)** desmarcado para publicar imágenes con Supabase, o márcalo para publicar toda la biblioteca sin imágenes en Firebase.
+4. Pulsa **Seleccionar libro PDF e Importar** y, si activaste solo texto, confirma la publicación sin imágenes. Si el libro tiene más de 40 páginas, vuelve a elegir exactamente el mismo PDF para continuar desde la siguiente página guardada.
 5. Elige el archivo en el selector. La importación requiere conexión a Internet.
 
 La app guarda la clave localmente en SQLite cuando se inicia la importación y la vuelve a cargar después. **No agregues la clave de Gemini al código, al README ni a Git.** Si una clave se expone, revócala y genera otra. En ambos modos se envían a Gemini las páginas del PDF para analizarlas; en solo texto no se generan recortes ni se publican imágenes. En Android el PDF se procesa con `PdfRenderer`; en Windows se usa PyMuPDF.
 
-Si vuelves a importar exactamente el mismo archivo PDF, se reemplazan sus ejercicios importados anteriores. El contenido precargado, los ejercicios agregados manualmente y los de otros PDF se conservan. Si el procesamiento falla o no genera ejercicios, la importación anterior no se modifica.
+El avance se guarda cada dos páginas analizadas. Si la app se cierra o falla la conexión, selecciona el mismo archivo PDF para continuar desde la última página guardada. Mantén la misma opción de imágenes durante toda la importación.
 
 ## Cuentas, roles y reglas de Firebase
 
