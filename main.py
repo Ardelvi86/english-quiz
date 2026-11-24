@@ -3667,7 +3667,17 @@ class EnglishQuizApp(App):
                     cleanup_errors = []
                     if include_images:
                         previous = self.firebase.get_shared_content(token)
-                        previous_paths = self._shared_image_paths(previous)
+                        try:
+                            previous_paths = self._shared_image_paths(previous)
+                        except (FirebaseError, ValueError) as exc:
+                            # Invalid old data should not block replacing it with
+                            # the valid snapshot built from the local database.
+                            previous_paths = set()
+                            cleanup_errors.append(
+                                "No se pudieron limpiar imágenes antiguas porque "
+                                "la biblioteca anterior de Firebase no es válida: %s"
+                                % exc
+                            )
                         storage = SupabaseStorageClient(
                             self.db.get_setting("supabase_url", "").strip()
                             or SUPABASE_PROJECT_URL,
