@@ -9,6 +9,7 @@ import io
 import itertools
 import json
 import os
+import socket
 import threading
 import time
 import urllib.error
@@ -292,6 +293,18 @@ class BookImporter:
                     on_retry(delay)
                 time.sleep(delay)
                 attempt += 1
+            except urllib.error.URLError as exc:
+                reason = exc.reason
+                if isinstance(reason, socket.gaierror):
+                    raise RuntimeError(
+                        "No se pudo encontrar el servidor de Gemini "
+                        "(generativelanguage.googleapis.com). Revisa que el "
+                        "teléfono tenga internet y que DNS, VPN o DNS privado "
+                        "no estén bloqueando la conexión."
+                    ) from exc
+                raise RuntimeError(
+                    "No se pudo conectar con Gemini: %s" % reason
+                ) from exc
         raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
         return json.loads(raw_text)
 
