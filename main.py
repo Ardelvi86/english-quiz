@@ -1310,6 +1310,10 @@ KV = r"""
                         text: 'Eliminar libro importado'
                         bg: 0.62, 0.20, 0.22, 1
                         on_release: root.confirm_delete_pdf_import()
+                    RBtn:
+                        text: 'Eliminar todos los ejercicios manuales y de PDF'
+                        bg: 0.62, 0.20, 0.22, 1
+                        on_release: root.confirm_delete_all_managed_exercises()
                     WrapLabel:
                         text: 'El PDF sigue procesándose con Gemini, pero la biblioteca compartida se publica sin imágenes. No borra las imágenes guardadas en Supabase.'
                         color: C_MUTED
@@ -1870,6 +1874,54 @@ class Database:
                 "DELETE FROM pdf_import_sessions WHERE source_hash=?",
                 (source_hash,),
             )
+        return image_files
+
+    def delete_all_managed_exercises(self, user_id=None):
+        """Delete administrator-created exercises while preserving bundled content."""
+        with self._progress_lock:
+            rows = self.conn.execute("""
+                SELECT id, image_file, full_image_file FROM exercises
+                WHERE source IN ('admin', 'pdf')
+            """).fetchall()
+            image_files = [
+                filename
+                for row in rows
+                for filename in (row["image_file"], row["full_image_file"])
+                if filename
+            ]
+            with self.conn:
+                if user_id:
+                    deleted_before = int(time.time() * 1000)
+                    for row in rows:
+                        exercise_key = self.exercise_key(row["id"])
+                        if not exercise_key:
+                            continue
+                        self.conn.execute(
+                            """INSERT INTO progress_deletions(
+                                user_id,exercise_key,deleted_before
+                            ) VALUES(?,?,?)
+                            ON CONFLICT(user_id,exercise_key) DO UPDATE SET
+                                deleted_before=excluded.deleted_before""",
+                            (user_id, exercise_key, deleted_before),
+                        )
+                        self.conn.execute(
+                            """DELETE FROM progress_events
+                            WHERE user_id=? AND exercise_key=? AND created_at<=?""",
+                            (user_id, exercise_key, deleted_before),
+                        )
+                self.conn.execute(
+                    "DELETE FROM exercises WHERE source IN ('admin', 'pdf')"
+                )
+                self.conn.execute(
+                    """DELETE FROM topics
+                    WHERE source IN ('admin', 'pdf')
+                    AND NOT EXISTS (
+                        SELECT 1 FROM exercises WHERE exercises.topic_id=topics.id
+                    )"""
+                )
+                self.conn.execute("DELETE FROM pdf_import_sessions")
+                self.conn.execute("DELETE FROM pdf_imported_exercises")
+                self.conn.execute("DELETE FROM pdf_imported_topics")
         return image_files
 
     def shared_content_snapshot(self):
@@ -3177,6 +3229,43 @@ class AdminScreen(Screen):
         self.say("Libro eliminado. Publicando biblioteca...")
         app._publish_shared_content_async(
             lambda error: self.say(error or "Libro eliminado y biblioteca publicada.", error is None)
+        )
+
+    def confirm_delete_all_managed_exercises(self):
+        app = App.get_running_app()
+        if not app.is_admin:
+            return
+        confirm(
+            "Eliminar todos los ejercicios",
+            "Se eliminarán todos los ejercicios creados manualmente o importados "
+            "desde PDF, junto con sus imágenes locales y sesiones. Los ejercicios "
+            "precargados de la app se conservarán. ¿Continuar?",
+            self.delete_all_managed_exercises,
+        )
+
+    def delete_all_managed_exercises(self):
+        app = App.get_running_app()
+        if not app.is_admin:
+            return
+        image_files = app.db.delete_all_managed_exercises(
+            user_id=app.current_user["uid"]
+        )
+        for filename in image_files:
+            path = os.path.join(app.user_images_dir, filename)
+            if os.path.isfile(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        app._sync_progress_async(fetch_remote=False)
+        self.refresh_pdf_imports()
+        self.refresh_topics()
+        self.say("Ejercicios eliminados. Publicando biblioteca...")
+        app._publish_shared_content_async(
+            lambda error: self.say(
+                error or "Ejercicios eliminados y biblioteca publicada.",
+                error is None,
+            )
         )
 
     def say(self, text, ok=True):
