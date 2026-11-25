@@ -1733,11 +1733,23 @@ class Database:
 
     def pdf_imports(self):
         return [dict(row) for row in self.conn.execute("""
-            SELECT s.source_hash, s.total_pages, s.next_page, s.completed,
+            SELECT imports.source_hash,
+                   COALESCE(s.total_pages, 0) AS total_pages,
+                   COALESCE(s.next_page, 0) AS next_page,
+                   COALESCE(s.completed, 0) AS completed,
                    COALESCE((SELECT group_concat(t.name, ', ')
                      FROM pdf_imported_topics p JOIN topics t ON t.id=p.topic_id
-                     WHERE p.source_hash=s.source_hash), 'Libro sin ejercicios') AS title
-            FROM pdf_import_sessions s ORDER BY s.updated_at DESC
+                     WHERE p.source_hash=imports.source_hash),
+                     'Libro sin ejercicios') AS title
+            FROM (
+                SELECT source_hash FROM pdf_import_sessions
+                UNION
+                SELECT source_hash FROM pdf_imported_exercises
+                UNION
+                SELECT source_hash FROM pdf_imported_topics
+            ) imports
+            LEFT JOIN pdf_import_sessions s ON s.source_hash=imports.source_hash
+            ORDER BY COALESCE(s.updated_at, '') DESC
         """).fetchall()]
 
     def save_pdf_import_batch(self, source_hash, total_pages, next_page,
@@ -1852,6 +1864,8 @@ class Database:
                 "DELETE FROM pdf_imported_topics WHERE source_hash=?",
                 (source_hash,),
             )
+            # A topic can be shared by multiple PDF imports. Keep its link for
+            # the other books after deleting this book's link.
             self.conn.execute(
                 "DELETE FROM pdf_import_sessions WHERE source_hash=?",
                 (source_hash,),
@@ -3308,18 +3322,12 @@ class AdminScreen(Screen):
         def start_import():
             pick_pdf_file(app.user_data_dir, on_picked, on_error)
 
-        if text_only or restart:
+        if text_only:
             confirmations = []
-            if restart:
-                confirmations.append(
-                    "Se borrarán los ejercicios importados anteriormente desde "
-                    "este mismo PDF y se analizará de nuevo desde la página 1."
-                )
-            if text_only:
-                confirmations.append(
-                    "La biblioteca compartida se publicará sin imágenes para "
-                    "todos los usuarios. Las imágenes de Supabase no se borrarán."
-                )
+            confirmations.append(
+                "La biblioteca compartida se publicará sin imágenes para "
+                "todos los usuarios. Las imágenes de Supabase no se borrarán."
+            )
             confirm(
                 "Confirmar importación",
                 "\n\n".join(confirmations) + " ¿Continuar?",
