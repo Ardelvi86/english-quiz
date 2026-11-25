@@ -892,6 +892,15 @@ KV = r"""
                         opacity: 0
                         allow_stretch: True
                         keep_ratio: True
+                    RBtn:
+                        id: image_zoom_btn
+                        text: 'Ampliar imagen'
+                        bg: C_SURFACE2
+                        size_hint_y: None
+                        height: dp(40)
+                        opacity: 0
+                        disabled: True
+                        on_release: root.show_image_zoom()
                     WrapLabel:
                         id: prompt
                         text: 'Tu ejercicio aparecerá aquí.'
@@ -1293,6 +1302,23 @@ KV = r"""
                             halign: 'left'
                             valign: 'middle'
                             text_size: self.size
+                    BoxLayout:
+                        size_hint_y: None
+                        height: dp(48)
+                        spacing: dp(8)
+                        CheckBox:
+                            id: restart_pdf_import
+                            size_hint_x: None
+                            width: dp(40)
+                            active: False
+                            color: C_TEXT
+                        Label:
+                            text: 'Reanalizar desde el inicio y reemplazar lo importado de este PDF'
+                            color: C_TEXT
+                            font_size: '13sp'
+                            halign: 'left'
+                            valign: 'middle'
+                            text_size: self.size
                     WrapLabel:
                         text: 'El PDF sigue procesándose con Gemini, pero la biblioteca compartida se publica sin imágenes. No borra las imágenes guardadas en Supabase.'
                         color: C_MUTED
@@ -1412,6 +1438,7 @@ class Database:
             audio_file TEXT DEFAULT '',
             mode TEXT DEFAULT 'exact',
             image_file TEXT DEFAULT '',
+            full_image_file TEXT DEFAULT '',
             source TEXT NOT NULL DEFAULT 'admin',
             FOREIGN KEY(topic_id) REFERENCES topics(id) ON DELETE CASCADE)""")
         c.execute("""CREATE TABLE IF NOT EXISTS attempts (
@@ -1472,6 +1499,10 @@ class Database:
             )
         if "image_file" not in exercise_cols:
             self.conn.execute("ALTER TABLE exercises ADD COLUMN image_file TEXT DEFAULT ''")
+        if "full_image_file" not in exercise_cols:
+            self.conn.execute(
+                "ALTER TABLE exercises ADD COLUMN full_image_file TEXT DEFAULT ''"
+            )
         if "source" not in exercise_cols:
             self.conn.execute(
                 "ALTER TABLE exercises ADD COLUMN source TEXT NOT NULL DEFAULT 'admin'"
@@ -1680,8 +1711,9 @@ class Database:
                 for exercise in topic["exercises"]:
                     cursor = self.conn.execute(
                         """INSERT INTO exercises(
-                            topic_id,prompt,passage,answer,audio_file,mode,image_file,source
-                        ) VALUES(?,?,?,?,?,?,?,'pdf')""",
+                            topic_id,prompt,passage,answer,audio_file,mode,image_file,
+                            full_image_file,source
+                        ) VALUES(?,?,?,?,?,?,?,?,'pdf')""",
                         (
                             topic_id,
                             exercise["prompt"],
@@ -1690,6 +1722,7 @@ class Database:
                             "",
                             exercise["mode"],
                             exercise["image_file"],
+                            exercise.get("full_image_file", ""),
                         ),
                     )
                     self.conn.execute(
@@ -1744,8 +1777,9 @@ class Database:
                 for exercise in topic["exercises"]:
                     cursor = self.conn.execute(
                         """INSERT INTO exercises(
-                            topic_id,prompt,passage,answer,audio_file,mode,image_file,source
-                        ) VALUES(?,?,?,?,?,?,?,'pdf')""",
+                            topic_id,prompt,passage,answer,audio_file,mode,image_file,
+                            full_image_file,source
+                        ) VALUES(?,?,?,?,?,?,?,?,'pdf')""",
                         (
                             topic_id,
                             exercise["prompt"],
@@ -1754,6 +1788,7 @@ class Database:
                             "",
                             exercise["mode"],
                             exercise["image_file"],
+                            exercise.get("full_image_file", ""),
                         ),
                     )
                     self.conn.execute(
@@ -1784,6 +1819,45 @@ class Database:
 
         return created_topics, created_exercises
 
+    def reset_pdf_import(self, source_hash):
+        rows = self.conn.execute(
+            """SELECT e.image_file,e.full_image_file FROM exercises e
+            JOIN pdf_imported_exercises p ON p.exercise_id=e.id
+            WHERE p.source_hash=?""",
+            (source_hash,),
+        ).fetchall()
+        image_files = [
+            image for row in rows
+            for image in (row["image_file"], row["full_image_file"])
+            if image
+        ]
+        with self.conn:
+            self.conn.execute(
+                """DELETE FROM exercises WHERE id IN (
+                    SELECT exercise_id FROM pdf_imported_exercises WHERE source_hash=?
+                )""",
+                (source_hash,),
+            )
+            self.conn.execute(
+                """DELETE FROM topics
+                WHERE id IN (
+                    SELECT topic_id FROM pdf_imported_topics WHERE source_hash=?
+                ) AND source='pdf'
+                AND NOT EXISTS (
+                    SELECT 1 FROM exercises WHERE exercises.topic_id=topics.id
+                )""",
+                (source_hash,),
+            )
+            self.conn.execute(
+                "DELETE FROM pdf_imported_topics WHERE source_hash=?",
+                (source_hash,),
+            )
+            self.conn.execute(
+                "DELETE FROM pdf_import_sessions WHERE source_hash=?",
+                (source_hash,),
+            )
+        return image_files
+
     def shared_content_snapshot(self):
         topics = self.conn.execute("""
             SELECT DISTINCT t.id, t.category, t.name, t.description
@@ -1796,7 +1870,7 @@ class Database:
         snapshot_topics = []
         for topic in topics:
             exercises = self.conn.execute("""
-                SELECT prompt, passage, answer, mode, image_file
+                SELECT prompt, passage, answer, mode, image_file, full_image_file
                 FROM exercises
                 WHERE topic_id=? AND source IN ('admin','pdf')
                 ORDER BY id
@@ -1828,7 +1902,8 @@ class Database:
                         or not isinstance(exercise.get("answer"), str)
                         or not exercise["answer"].strip()
                         or not isinstance(exercise.get("mode", "exact"), str)
-                        or not isinstance(exercise.get("image_file", ""), str)):
+                        or not isinstance(exercise.get("image_file", ""), str)
+                        or not isinstance(exercise.get("full_image_file", ""), str)):
                     raise ValueError(
                         "Firebase devolvió un ejercicio compartido no válido."
                     )
@@ -1868,13 +1943,15 @@ class Database:
                 for exercise in topic["exercises"]:
                     self.conn.execute(
                         """INSERT INTO exercises(
-                            topic_id,prompt,passage,answer,audio_file,mode,image_file,source
-                        ) VALUES(?,?,?,?,?,?,?,'shared')""",
+                            topic_id,prompt,passage,answer,audio_file,mode,image_file,
+                            full_image_file,source
+                        ) VALUES(?,?,?,?,?,?,?,?,'shared')""",
                         (
                             topic_id, exercise["prompt"].strip(),
                             exercise.get("passage", ""), exercise["answer"].strip(),
                             "", exercise.get("mode", "exact"),
                             exercise.get("image_file", ""),
+                            exercise.get("full_image_file", ""),
                         ),
                     )
 
@@ -2510,6 +2587,10 @@ class AreaScreen(Screen):
         ids.ex_image.source = ""
         ids.ex_image.opacity = 0
         ids.ex_image.height = 0
+        ids.image_zoom_btn.opacity = 0
+        ids.image_zoom_btn.disabled = True
+        self.full_image_path = ""
+        self.zoom_image_path = ""
         self.clear_feedback()
         ids.progress.text = ""
         ids.bar.value = 0
@@ -2542,10 +2623,18 @@ class AreaScreen(Screen):
 
         img_name = item["image_file"] if "image_file" in item.keys() else ""
         img_path = resolve_image_path(img_name)
+        full_img_name = (
+            item["full_image_file"]
+            if "full_image_file" in item.keys() else ""
+        )
+        self.full_image_path = resolve_image_path(full_img_name)
+        self.zoom_image_path = img_path or self.full_image_path
+        ids.image_zoom_btn.opacity = 1 if self.zoom_image_path else 0
+        ids.image_zoom_btn.disabled = not bool(self.zoom_image_path)
         if img_path:
             ids.ex_image.source = img_path
             ids.ex_image.opacity = 1
-            ids.ex_image.height = dp(170)
+            ids.ex_image.height = dp(250)
         else:
             ids.ex_image.source = ""
             ids.ex_image.opacity = 0
@@ -2556,6 +2645,33 @@ class AreaScreen(Screen):
             self.index + 1, total, self.correct_count)
         ids.bar.maximum = total
         Animation(value=self.index + 1, d=0.3, t="out_quad").start(ids.bar)
+
+    def show_image_zoom(self):
+        image_path = getattr(self, "zoom_image_path", "")
+        if not image_path or not os.path.isfile(image_path):
+            return
+        content = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
+        page_image = KivyImage(
+            source=image_path,
+            allow_stretch=True,
+            keep_ratio=True,
+        )
+        content.add_widget(page_image)
+        close_button = RBtn(
+            text="Cerrar",
+            size_hint_y=None,
+            height=dp(46),
+            bg=SURFACE2,
+        )
+        popup = Popup(
+            title="Imagen ampliada",
+            content=content,
+            size_hint=(0.96, 0.92),
+            auto_dismiss=True,
+        )
+        close_button.bind(on_release=popup.dismiss)
+        content.add_widget(close_button)
+        popup.open()
 
     def check_answer(self):
         item = self.current
@@ -3122,6 +3238,7 @@ class AdminScreen(Screen):
         app = App.get_running_app()
         app.db.set_setting("gemini_api_key", api_key)
         text_only = self.ids.text_only_import.active
+        restart = self.ids.restart_pdf_import.active
 
         def on_error(message):
             Clock.schedule_once(lambda *_: self._import_failed(message), 0)
@@ -3149,17 +3266,27 @@ class AdminScreen(Screen):
                 on_done=on_done,
                 on_error=on_error,
                 include_images=not text_only,
+                restart=restart,
             )
 
         def start_import():
             pick_pdf_file(app.user_data_dir, on_picked, on_error)
 
-        if text_only:
+        if text_only or restart:
+            confirmations = []
+            if restart:
+                confirmations.append(
+                    "Se borrarán los ejercicios importados anteriormente desde "
+                    "este mismo PDF y se analizará de nuevo desde la página 1."
+                )
+            if text_only:
+                confirmations.append(
+                    "La biblioteca compartida se publicará sin imágenes para "
+                    "todos los usuarios. Las imágenes de Supabase no se borrarán."
+                )
             confirm(
-                "Importar solo texto",
-                "Esto reemplazará la biblioteca compartida con una versión sin "
-                "imágenes para todos los usuarios. No eliminará las imágenes de "
-                "Supabase. ¿Continuar?",
+                "Confirmar importación",
+                "\n\n".join(confirmations) + " ¿Continuar?",
                 start_import,
             )
         else:
@@ -3515,23 +3642,25 @@ class EnglishQuizApp(App):
         if snapshot is None:
             return set()
         if not isinstance(snapshot, dict) or snapshot.get("version") != 1:
-            raise FirebaseError("Firebase devolvió una biblioteca compartida no válida.")
+            raise FirebaseError("Firebase devolvio una biblioteca compartida no valida.")
         topics = snapshot.get("topics", [])
         if topics is None:
             return set()
         if not isinstance(topics, list):
-            raise FirebaseError("Firebase devolvió una biblioteca compartida no válida.")
+            raise FirebaseError("Firebase devolvio una biblioteca compartida no valida.")
         paths = set()
         for topic in topics:
             if not isinstance(topic, dict) or not isinstance(topic.get("exercises"), list):
-                raise FirebaseError("Firebase devolvió un tema compartido no válido.")
+                raise FirebaseError("Firebase devolvio un tema compartido no valido.")
             for exercise in topic["exercises"]:
                 if not isinstance(exercise, dict):
-                    raise FirebaseError("Firebase devolvió un ejercicio compartido no válido.")
-                image_path = exercise.get("image_file", "")
-                if not isinstance(image_path, str):
-                    raise FirebaseError("Firebase devolvió una imagen no válida.")
-                if image_path:
+                    raise FirebaseError("Firebase devolvio un ejercicio compartido no valido.")
+                for field in ("image_file", "full_image_file"):
+                    image_path = exercise.get(field, "")
+                    if not isinstance(image_path, str):
+                        raise FirebaseError("Firebase devolvio una imagen no valida.")
+                    if not image_path:
+                        continue
                     if image_path.startswith("https://"):
                         _, _, object_name = (
                             SupabaseStorageClient.parse_public_url(image_path)
@@ -3541,16 +3670,35 @@ class EnglishQuizApp(App):
                     parts = object_name.split("/")
                     filename = parts[-1] if parts else ""
                     if (len(parts) != 3 or parts[0] != "shared-content"
-                            or len(parts[1]) == 0 or len(filename) != 68
+                            or not parts[1] or len(filename) != 68
                             or not filename.endswith(".jpg")
                             or any(char not in "0123456789abcdef"
                                    for char in filename[:-4])):
-                        raise FirebaseError(
-                            "Firebase devolvió una ruta de imagen compartida no válida."
-                        )
+                        raise FirebaseError("Firebase devolvio una ruta de imagen no valida.")
                     if image_path.startswith("https://"):
                         paths.add(image_path)
         return paths
+
+    def _cache_shared_image(self, local_exercise, field):
+        image_url = local_exercise.get(field, "")
+        if not isinstance(image_url, str):
+            raise FirebaseError("Firebase devolvio una imagen no valida.")
+        if not image_url.startswith("https://"):
+            local_exercise[field] = ""
+            return
+        _, _, object_name = SupabaseStorageClient.parse_public_url(image_url)
+        digest = object_name.rsplit("/", 1)[-1][:-4]
+        local_name = "shared_%s.jpg" % digest
+        local_path = os.path.join(self.user_images_dir, local_name)
+        if not os.path.isfile(local_path):
+            image_bytes = SupabaseStorageClient.download_public_image(image_url)
+            if hashlib.sha256(image_bytes).hexdigest() != digest:
+                raise FirebaseError("La imagen compartida no coincide con su identificador.")
+            temporary_path = local_path + ".tmp"
+            with open(temporary_path, "wb") as image_file:
+                image_file.write(image_bytes)
+            os.replace(temporary_path, local_path)
+        local_exercise[field] = local_name
 
     def _sync_shared_content_async(self):
         if self.current_user is None or self.is_admin:
@@ -3598,41 +3746,8 @@ class EnglishQuizApp(App):
                                 "Firebase devolvió un ejercicio compartido no válido."
                             )
                         local_exercise = dict(exercise)
-                        image_path = local_exercise.get("image_file", "")
-                        if image_path.startswith("https://"):
-                            _, _, object_name = (
-                                SupabaseStorageClient.parse_public_url(image_path)
-                            )
-                            filename = object_name.rsplit("/", 1)[-1]
-                            image_digest = filename[:-4]
-                            local_filename = "shared_%s.jpg" % image_digest
-                            image_path_on_device = os.path.join(
-                                self.user_images_dir, local_filename
-                            )
-                            valid_cached_file = False
-                            if os.path.isfile(image_path_on_device):
-                                with open(image_path_on_device, "rb") as image_file:
-                                    valid_cached_file = (
-                                        hashlib.sha256(image_file.read()).hexdigest()
-                                        == image_digest
-                                    )
-                            if not valid_cached_file:
-                                image_bytes = (
-                                    SupabaseStorageClient.download_public_image(
-                                        image_path
-                                    )
-                                )
-                                if hashlib.sha256(image_bytes).hexdigest() != image_digest:
-                                    raise FirebaseError(
-                                        "La imagen compartida no coincide con su identificador."
-                                    )
-                                temporary_path = image_path_on_device + ".tmp"
-                                with open(temporary_path, "wb") as image_file:
-                                    image_file.write(image_bytes)
-                                os.replace(temporary_path, image_path_on_device)
-                            local_exercise["image_file"] = local_filename
-                        elif image_path:
-                            local_exercise["image_file"] = ""
+                        self._cache_shared_image(local_exercise, "image_file")
+                        self._cache_shared_image(local_exercise, "full_image_file")
                         local_topic["exercises"].append(local_exercise)
                     local_topics.append(local_topic)
 
@@ -3689,9 +3804,13 @@ class EnglishQuizApp(App):
                             ).strip() or SUPABASE_STORAGE_BUCKET,
                         )
                         new_paths = set()
+                        uploaded_full_images = {}
                         for topic in snapshot["topics"]:
                             for exercise in topic["exercises"]:
-                                image_name = exercise["image_file"]
+                                image_name = (
+                                    exercise["image_file"]
+                                    or exercise.get("full_image_file", "")
+                                )
                                 if not image_name:
                                     continue
                                 if os.path.basename(image_name) != image_name:
@@ -3731,6 +3850,45 @@ class EnglishQuizApp(App):
                                 )
                                 exercise["image_file"] = public_url
                                 new_paths.add(public_url)
+
+                                full_image_name = exercise.get("full_image_file", "")
+                                if full_image_name:
+                                    if os.path.basename(full_image_name) != full_image_name:
+                                        raise ValueError(
+                                            "El nombre de la página completa no es válido."
+                                        )
+                                    full_path = os.path.join(
+                                        self.user_images_dir, full_image_name
+                                    )
+                                    if not os.path.isfile(full_path):
+                                        full_path = os.path.join(
+                                            BUNDLED_IMAGE_DIR, full_image_name
+                                        )
+                                    if not os.path.isfile(full_path):
+                                        raise ValueError(
+                                            "No se encuentra la página completa: %s"
+                                            % full_image_name
+                                        )
+                                    with open(full_path, "rb") as image_file:
+                                        full_bytes = SupabaseStorageClient.to_jpeg(
+                                            image_file.read()
+                                        )
+                                    if len(full_bytes) >= 10 * 1024 * 1024:
+                                        raise ValueError(
+                                            "La página completa supera el límite de 10 MB."
+                                        )
+                                    full_digest = hashlib.sha256(full_bytes).hexdigest()
+                                    full_url = uploaded_full_images.get(full_digest)
+                                    if full_url is None:
+                                        full_object = "shared-content/%s/%s.jpg" % (
+                                            user_id, full_digest
+                                        )
+                                        full_url = storage.upload_image(
+                                            full_object, full_bytes, token
+                                        )
+                                        uploaded_full_images[full_digest] = full_url
+                                    exercise["full_image_file"] = full_url
+                                    new_paths.add(full_url)
                     else:
                         snapshot = text_only_shared_content(snapshot)
                     self.firebase.put_shared_content(snapshot, token)

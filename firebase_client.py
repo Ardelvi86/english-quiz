@@ -20,7 +20,7 @@ def text_only_shared_content(snapshot):
             {
                 **topic,
                 "exercises": [
-                    {**exercise, "image_file": ""}
+                    {**exercise, "image_file": "", "full_image_file": ""}
                     for exercise in topic["exercises"]
                 ],
             }

@@ -71,6 +71,8 @@ Reglas obligatorias:
 - Asocia una imagen siempre que el ejercicio dependa de una actividad o elemento
   visual de la página. El recorte debe incluir la información necesaria para
   responder (incluido el texto impreso relevante cuando sea parte de la actividad).
+  Incluye la actividad completa, sus instrucciones, etiquetas y opciones; deja
+  un margen visible alrededor y no ajustes el recorte al borde del contenido.
   No asocies fotos decorativas ni recortes que no permitan contestar.
 - Usa "image_box": null y "image_reason": "" únicamente si la pregunta se basa
   en texto corrido y no existe una actividad visual relevante en esas páginas.
@@ -87,7 +89,6 @@ PROMPT_EXTRACCION_SOLO_TEXTO = PROMPT_EXTRACCION + (
     '"image_box": null.\n'
 )
 
-
 class BookImporter:
     def __init__(self, db, images_dir):
         self.db = db
@@ -96,12 +97,12 @@ class BookImporter:
 
     def import_pdf_async(self, pdf_path, api_key,
                          on_progress=None, on_done=None, on_error=None,
-                         include_images=True):
+                         include_images=True, restart=False):
         thread = threading.Thread(
             target=self._run,
             args=(
                 pdf_path, api_key, on_progress, on_done, on_error,
-                include_images,
+                include_images, restart,
             ),
             daemon=True,
         )
@@ -171,7 +172,7 @@ class BookImporter:
             raise RuntimeError("En PC instala pymupdf (`pip install pymupdf`) para probar PDFs.")
 
     def _run(self, pdf_path, api_key, on_progress, on_done, on_error,
-             include_images=True):
+             include_images=True, restart=False):
         if not api_key:
             if on_error:
                 on_error("Pega tu API Key de Gemini antes de importar.")
@@ -180,6 +181,16 @@ class BookImporter:
         try:
             source_hash = self._hash_pdf(pdf_path)
             session = self.db.get_pdf_import_session(source_hash)
+            if restart:
+                old_images = self.db.reset_pdf_import(source_hash)
+                for filename in old_images:
+                    old_path = os.path.join(self.images_dir, filename)
+                    if os.path.isfile(old_path):
+                        try:
+                            os.remove(old_path)
+                        except OSError:
+                            pass
+                session = None
             if session and bool(session["include_images"]) != bool(include_images):
                 raise RuntimeError(
                     "Este libro tiene una importación pendiente con otra opción "
@@ -228,10 +239,13 @@ class BookImporter:
                         f"{total_pages}. Analizando {start + 1}-{end}..."
                     )
 
-                prompt = (
+                extraction_prompt = (
                     PROMPT_EXTRACCION
                     if include_images else PROMPT_EXTRACCION_SOLO_TEXTO
-                ).replace("{batch_target}", str(batch_target))
+                )
+                prompt = extraction_prompt.replace(
+                    "{batch_target}", str(batch_target)
+                )
                 parts = [{"text": prompt}]
                 for pil_img in batch_imgs:
                     buf = io.BytesIO()
@@ -399,7 +413,6 @@ class BookImporter:
                     )
                     if img_filename:
                         staged_images.append(img_filename)
-
                 exercises.append(
                     {
                         "prompt": prompt,
@@ -407,6 +420,7 @@ class BookImporter:
                         "answer": answer,
                         "mode": ex.get("mode", "exact"),
                         "image_file": img_filename,
+                        "full_image_file": "",
                     }
                 )
 
@@ -428,9 +442,15 @@ class BookImporter:
         top = max(0, int((ymin / 1000.0) * h))
         right = min(w, int((xmax / 1000.0) * w))
         bottom = min(h, int((ymax / 1000.0) * h))
+        pad_x = max(int(w * 0.025), int((right - left) * 0.12))
+        pad_y = max(int(h * 0.025), int((bottom - top) * 0.12))
+        left = max(0, left - pad_x)
+        top = max(0, top - pad_y)
+        right = min(w, right + pad_x)
+        bottom = min(h, bottom + pad_y)
         if right - left < 20 or bottom - top < 20:
             return ""
         cropped = pil_img.crop((left, top, right, bottom))
         out_path = os.path.join(self.images_dir, filename)
-        cropped.save(out_path, format="JPEG", quality=85)
+        cropped.save(out_path, format="JPEG", quality=88)
         return filename
