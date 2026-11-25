@@ -53,7 +53,7 @@ py -3.12 -m venv .venv
 
 La app guarda la clave localmente en SQLite cuando se inicia la importación y la vuelve a cargar después. **No agregues la clave de Gemini al código, al README ni a Git.** Si una clave se expone, revócala y genera otra. En ambos modos se envían a Gemini las páginas del PDF para analizarlas; en solo texto no se generan recortes ni se publican imágenes. En Android el PDF se procesa con `PdfRenderer`; en Windows se usa PyMuPDF.
 
-El avance se guarda cada dos páginas analizadas. Si la app se cierra o falla la conexión, selecciona el mismo archivo PDF para continuar desde la última página guardada. Mantén la misma opción de imágenes durante toda la importación.
+El avance se guarda cada cuatro páginas analizadas. La app conserva una copia local del PDF y ofrece el botón **Reanudar última importación pendiente** para continuar desde el último lote guardado, incluso después de cerrar la app o de un error. Mantén la misma opción de imágenes durante toda la importación.
 
 ## Cuentas, roles y reglas de Firebase
 

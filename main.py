@@ -12,6 +12,7 @@ import os
 import random
 import re
 import sqlite3
+import shutil
 import threading
 import time
 import unicodedata
@@ -1323,6 +1324,12 @@ KV = r"""
                         text: 'Seleccionar libro PDF e Importar'
                         bg: 0.13, 0.67, 0.50, 1
                         on_release: root.pick_and_import_pdf()
+                    RBtn:
+                        id: resume_pdf_btn
+                        text: 'Reanudar última importación pendiente'
+                        bg: C_PRIMARY
+                        disabled: True
+                        on_release: root.resume_pdf_import()
                     Banner:
                         id: status
                         text: 'Pega tu API Key de Gemini para importar el libro.'
@@ -1755,6 +1762,15 @@ class Database:
             LEFT JOIN pdf_import_sessions s ON s.source_hash=imports.source_hash
             ORDER BY COALESCE(s.updated_at, '') DESC
         """).fetchall()]
+
+    def latest_pending_pdf_import(self):
+        row = self.conn.execute("""
+            SELECT source_hash, total_pages, next_page, include_images
+            FROM pdf_import_sessions
+            WHERE completed=0
+            ORDER BY updated_at DESC LIMIT 1
+        """).fetchone()
+        return dict(row) if row else None
 
     def save_pdf_import_batch(self, source_hash, total_pages, next_page,
                               include_images, topics):
@@ -3204,6 +3220,58 @@ class AdminScreen(Screen):
             self.pdf_import_map[label] = item["source_hash"]
         self.ids.pdf_import_pick.values = list(self.pdf_import_map)
         self.ids.pdf_import_pick.text = next(iter(self.pdf_import_map), "No hay libros importados")
+        pending = App.get_running_app().db.latest_pending_pdf_import()
+        pending_path = self._stored_pdf_path(pending["source_hash"]) if pending else ""
+        legacy_path = os.path.join(
+            App.get_running_app().user_data_dir, "imported_book.pdf"
+        )
+        available = bool(
+            pending and (
+                os.path.isfile(pending_path) or os.path.isfile(legacy_path)
+            )
+        )
+        self.ids.resume_pdf_btn.disabled = not available
+        if available:
+            self.ids.resume_pdf_btn.text = (
+                "Reanudar importación (pág. %d de %d)"
+                % (pending["next_page"] + 1, pending["total_pages"])
+            )
+        else:
+            self.ids.resume_pdf_btn.text = "Reanudar última importación pendiente"
+
+    def _stored_pdf_path(self, source_hash):
+        return os.path.join(
+            App.get_running_app().user_data_dir,
+            "pdf_imports",
+            source_hash + ".pdf",
+        )
+
+    def resume_pdf_import(self):
+        app = App.get_running_app()
+        pending = app.db.latest_pending_pdf_import()
+        if not pending:
+            self.say("No hay una importación pendiente para reanudar.", False)
+            self.refresh_pdf_imports()
+            return
+        pdf_path = self._stored_pdf_path(pending["source_hash"])
+        if not os.path.isfile(pdf_path):
+            legacy_path = os.path.join(app.user_data_dir, "imported_book.pdf")
+            if os.path.isfile(legacy_path):
+                try:
+                    if BookImporter._hash_pdf(legacy_path) == pending["source_hash"]:
+                        os.makedirs(os.path.dirname(pdf_path), exist_ok=True)
+                        shutil.copyfile(legacy_path, pdf_path)
+                except OSError:
+                    pass
+        if not os.path.isfile(pdf_path):
+            self.say(
+                "No se encontró el PDF guardado en este dispositivo. "
+                "Selecciona el archivo original para continuar.",
+                False,
+            )
+            self.ids.resume_pdf_btn.disabled = True
+            return
+        self.pick_and_import_pdf(pdf_path=pdf_path)
 
     def confirm_delete_pdf_import(self):
         source_hash = self.pdf_import_map.get(self.ids.pdf_import_pick.text)
@@ -3224,6 +3292,12 @@ class AdminScreen(Screen):
                     os.remove(path)
                 except OSError:
                     pass
+        stored_pdf = self._stored_pdf_path(source_hash)
+        if os.path.isfile(stored_pdf):
+            try:
+                os.remove(stored_pdf)
+            except OSError:
+                pass
         self.refresh_pdf_imports()
         self.refresh_topics()
         self.say("Libro eliminado. Publicando biblioteca...")
@@ -3257,6 +3331,15 @@ class AdminScreen(Screen):
                     os.remove(path)
                 except OSError:
                     pass
+        pdf_dir = os.path.join(app.user_data_dir, "pdf_imports")
+        if os.path.isdir(pdf_dir):
+            for filename in os.listdir(pdf_dir):
+                path = os.path.join(pdf_dir, filename)
+                if os.path.isfile(path) and filename.lower().endswith(".pdf"):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
         app._sync_progress_async(fetch_remote=False)
         self.refresh_pdf_imports()
         self.refresh_topics()
@@ -3369,7 +3452,7 @@ class AdminScreen(Screen):
             )
         )
 
-    def pick_and_import_pdf(self):
+    def pick_and_import_pdf(self, pdf_path=None):
         if not App.get_running_app().is_admin:
             return
         api_key = self.ids.gemini_key.text.strip()
@@ -3378,13 +3461,35 @@ class AdminScreen(Screen):
             return
         app = App.get_running_app()
         app.db.set_setting("gemini_api_key", api_key)
-        text_only = self.ids.text_only_import.active
+        pending = (
+            app.db.get_pdf_import_session(
+                os.path.splitext(os.path.basename(pdf_path))[0]
+            ) if pdf_path else None
+        )
+        text_only = (
+            not bool(pending["include_images"])
+            if pending else self.ids.text_only_import.active
+        )
 
         def on_error(message):
             Clock.schedule_once(lambda *_: self._import_failed(message), 0)
 
         def on_picked(pdf_path):
+            try:
+                source_hash = BookImporter._hash_pdf(pdf_path)
+                pdf_dir = os.path.join(app.user_data_dir, "pdf_imports")
+                os.makedirs(pdf_dir, exist_ok=True)
+                stored_path = os.path.join(pdf_dir, source_hash + ".pdf")
+                if os.path.abspath(pdf_path) != os.path.abspath(stored_path):
+                    shutil.copyfile(pdf_path, stored_path)
+                pdf_path = stored_path
+            except Exception as exc:
+                self._import_failed(
+                    "No se pudo guardar el PDF para reanudar: %s" % exc
+                )
+                return
             self.ids.import_pdf_btn.disabled = True
+            self.ids.resume_pdf_btn.disabled = True
             importer = BookImporter(app.db, app.user_images_dir)
 
             def on_progress(message):
@@ -3409,7 +3514,10 @@ class AdminScreen(Screen):
             )
 
         def start_import():
-            pick_pdf_file(app.user_data_dir, on_picked, on_error)
+            if pdf_path:
+                on_picked(pdf_path)
+            else:
+                pick_pdf_file(app.user_data_dir, on_picked, on_error)
 
         if text_only:
             confirmations = []
@@ -3455,6 +3563,7 @@ class AdminScreen(Screen):
 
     def _import_failed(self, message):
         self.ids.import_pdf_btn.disabled = False
+        self.refresh_pdf_imports()
         self.say(message, False)
 
     def save_topic(self):

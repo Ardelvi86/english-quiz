@@ -21,6 +21,8 @@ from PIL import Image
 
 from network_utils import create_ssl_context
 
+IMPORT_BATCH_SIZE = 4
+
 PROMPT_EXTRACCION = """
 Analiza estas páginas de un libro de inglés como material para crear una
 actividad de observación y transcripción. Identifica las unidades y sus temas,
@@ -206,7 +208,7 @@ class BookImporter:
             import_id = uuid.uuid4().hex[:12]
             if on_progress:
                 on_progress("Preparando la importación desde la página %d..." % (start_page + 1))
-            batch_size = 2
+            batch_size = IMPORT_BATCH_SIZE
             batch_iterator = iter(self._iter_page_batches(
                 pdf_path, batch_size, start_page
             ))
@@ -220,6 +222,11 @@ class BookImporter:
                     on_error("El PDF no contiene páginas legibles.")
                 return
             first_total, _, _ = first_batch
+            # Leave a checkpoint before the first Gemini request, so a failure
+            # on the first batch can still be resumed from page one.
+            self.db.save_pdf_import_batch(
+                source_hash, first_total, start_page, include_images, []
+            )
             batches = itertools.chain((first_batch,), batch_iterator)
             session_end = min(start_page + 40, first_total)
             session_topics = 0
