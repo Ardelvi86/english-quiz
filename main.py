@@ -1302,23 +1302,14 @@ KV = r"""
                             halign: 'left'
                             valign: 'middle'
                             text_size: self.size
-                    BoxLayout:
-                        size_hint_y: None
-                        height: dp(48)
-                        spacing: dp(8)
-                        CheckBox:
-                            id: restart_pdf_import
-                            size_hint_x: None
-                            width: dp(40)
-                            active: False
-                            color: C_TEXT
-                        Label:
-                            text: 'Reanalizar desde el inicio y reemplazar lo importado de este PDF'
-                            color: C_TEXT
-                            font_size: '13sp'
-                            halign: 'left'
-                            valign: 'middle'
-                            text_size: self.size
+                    RSpinner:
+                        id: pdf_import_pick
+                        text: 'Selecciona un libro importado'
+                        values: []
+                    RBtn:
+                        text: 'Eliminar libro importado'
+                        bg: 0.62, 0.20, 0.22, 1
+                        on_release: root.confirm_delete_pdf_import()
                     WrapLabel:
                         text: 'El PDF sigue procesándose con Gemini, pero la biblioteca compartida se publica sin imágenes. No borra las imágenes guardadas en Supabase.'
                         color: C_MUTED
@@ -1739,6 +1730,15 @@ class Database:
             (source_hash,),
         ).fetchone()
         return dict(row) if row else None
+
+    def pdf_imports(self):
+        return [dict(row) for row in self.conn.execute("""
+            SELECT s.source_hash, s.total_pages, s.next_page, s.completed,
+                   COALESCE((SELECT group_concat(t.name, ', ')
+                     FROM pdf_imported_topics p JOIN topics t ON t.id=p.topic_id
+                     WHERE p.source_hash=s.source_hash), 'Libro sin ejercicios') AS title
+            FROM pdf_import_sessions s ORDER BY s.updated_at DESC
+        """).fetchall()]
 
     def save_pdf_import_batch(self, source_hash, total_pages, next_page,
                               include_images, topics):
@@ -3125,7 +3125,45 @@ class AdminScreen(Screen):
         )
         self.ids.text_only_import.active = False
         self.ids.gemini_key.text = app.db.get_setting("gemini_api_key", "")
+        self.refresh_pdf_imports()
         self.refresh_topics()
+
+    def refresh_pdf_imports(self):
+        self.pdf_import_map = {}
+        for item in App.get_running_app().db.pdf_imports():
+            progress = "completo" if item["completed"] else (
+                "pág. %d/%d" % (item["next_page"], item["total_pages"])
+            )
+            label = "%s — %s" % (item["title"], progress)
+            self.pdf_import_map[label] = item["source_hash"]
+        self.ids.pdf_import_pick.values = list(self.pdf_import_map)
+        self.ids.pdf_import_pick.text = next(iter(self.pdf_import_map), "No hay libros importados")
+
+    def confirm_delete_pdf_import(self):
+        source_hash = self.pdf_import_map.get(self.ids.pdf_import_pick.text)
+        if not source_hash:
+            self.say("No hay un libro importado seleccionado.", False)
+            return
+        confirm("Eliminar libro importado",
+                "Se eliminarán sus ejercicios, imágenes locales y avance por sesiones. ¿Continuar?",
+                lambda: self.delete_pdf_import(source_hash))
+
+    def delete_pdf_import(self, source_hash):
+        app = App.get_running_app()
+        image_files = app.db.reset_pdf_import(source_hash)
+        for filename in image_files:
+            path = os.path.join(app.user_images_dir, filename)
+            if os.path.isfile(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        self.refresh_pdf_imports()
+        self.refresh_topics()
+        self.say("Libro eliminado. Publicando biblioteca...")
+        app._publish_shared_content_async(
+            lambda error: self.say(error or "Libro eliminado y biblioteca publicada.", error is None)
+        )
 
     def say(self, text, ok=True):
         color = OK_COLOR if ok else BAD_COLOR
@@ -3238,7 +3276,6 @@ class AdminScreen(Screen):
         app = App.get_running_app()
         app.db.set_setting("gemini_api_key", api_key)
         text_only = self.ids.text_only_import.active
-        restart = self.ids.restart_pdf_import.active
 
         def on_error(message):
             Clock.schedule_once(lambda *_: self._import_failed(message), 0)
@@ -3266,7 +3303,6 @@ class AdminScreen(Screen):
                 on_done=on_done,
                 on_error=on_error,
                 include_images=not text_only,
-                restart=restart,
             )
 
         def start_import():
@@ -3295,6 +3331,7 @@ class AdminScreen(Screen):
     def _import_finished(self, topics, exercises, start_page, end_page,
                          total_pages, complete, text_only=False):
         self.ids.import_pdf_btn.disabled = False
+        self.refresh_pdf_imports()
         self.refresh_topics()
         self.say(
             "Sesión guardada. Publicando biblioteca sin imágenes..."

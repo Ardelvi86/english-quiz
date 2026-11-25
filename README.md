@@ -48,7 +48,7 @@ py -3.12 -m venv .venv
 1. Crea una API key en [Google AI Studio](https://aistudio.google.com/app/apikey).
 2. En la app, abre **Manage & Importar PDF** y pega la clave en **Gemini API Key**.
 3. La importación procesa hasta 40 páginas por sesión y guarda el avance después de cada lote. Deja **Solo texto (sin imágenes)** desmarcado para publicar imágenes con Supabase, o márcalo para publicar sin imágenes.
-4. Pulsa **Seleccionar libro PDF e Importar**. Si el libro tiene más de 40 páginas, vuelve a elegir exactamente el mismo PDF para continuar desde la siguiente página guardada. Si quieres corregir los recortes de un PDF ya importado, marca **Reanalizar desde el inicio**; reemplazará los ejercicios de ese PDF y pedirá confirmación.
+4. Pulsa **Seleccionar libro PDF e Importar**. Si el libro tiene más de 40 páginas, vuelve a elegir exactamente el mismo PDF para continuar desde la siguiente p\u00e1gina guardada. En **Eliminar libro importado** puedes seleccionar una importación para borrar sus ejercicios locales y su avance por sesiones; después puedes importar de nuevo el PDF desde la primera p\u00e1gina.
 5. Elige el archivo en el selector. La importación requiere conexión a Internet.
 
 La app guarda la clave localmente en SQLite cuando se inicia la importación y la vuelve a cargar después. **No agregues la clave de Gemini al código, al README ni a Git.** Si una clave se expone, revócala y genera otra. En ambos modos se envían a Gemini las páginas del PDF para analizarlas; en solo texto no se generan recortes ni se publican imágenes. En Android el PDF se procesa con `PdfRenderer`; en Windows se usa PyMuPDF.
